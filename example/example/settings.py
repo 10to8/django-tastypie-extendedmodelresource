@@ -1,3 +1,4 @@
+import os
 from os.path import abspath, dirname, basename, join
 
 try:
@@ -21,6 +22,8 @@ DATABASES = {
         'NAME': 'api_example.sqlite',
     }
 }
+
+SITE_ROOT = os.path.dirname(os.path.realpath(__file__))
 
 TIME_ZONE = 'America/Chicago'
 
@@ -67,6 +70,7 @@ ROOT_URLCONF = 'example.urls'
 WSGI_APPLICATION = 'example.wsgi.application'
 
 TEMPLATE_DIRS = (
+    os.path.join(SITE_ROOT, 'templates'),
 )
 
 INSTALLED_APPS = (
@@ -94,12 +98,17 @@ LOGGING = {
             'level': 'ERROR',
             'filters': ['require_debug_false'],
             'class': 'django.utils.log.AdminEmailHandler'
-        }
+        },
+        'console': {
+            'level': 'WARNING',
+            'class': 'logging.StreamHandler',
+        },
+
     },
     'loggers': {
         'django.request': {
-            'handlers': ['mail_admins'],
-            'level': 'ERROR',
+            'handlers': ['console','mail_admins'],
+            'level': 'DEBUG',
             'propagate': True,
         },
     }

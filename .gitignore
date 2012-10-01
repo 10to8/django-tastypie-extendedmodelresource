@@ -41,3 +41,7 @@ nosetests.xml
 
 # Django
 local_settings.py
+
+.idea/
+
+example/.idea/

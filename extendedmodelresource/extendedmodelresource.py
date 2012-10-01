@@ -1,13 +1,13 @@
-from django.http import HttpResponse
+from django.http import HttpResponse, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404
 from django.conf.urls.defaults import patterns, url, include
 
 from tastypie import fields, http
-from tastypie.exceptions import NotFound, ImmediateHttpResponse
+from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
 from tastypie.resources import ResourceOptions, ModelDeclarativeMetaclass, \
     ModelResource, convert_post_to_put
-from tastypie.utils import trailing_slash
+from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
@@ -66,7 +66,7 @@ class ExtendedModelResource(ModelResource):
         kwargs_subset = url_dict.copy()
 
         for key in ['api_name', 'resource_name', 'related_manager',
-                    'child_object', 'parent_resource', 'nested_name',
+                    'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
                     'parent_object']:
             try:
                 del(kwargs_subset[key])
@@ -122,7 +122,20 @@ class ExtendedModelResource(ModelResource):
 
         Each resource listed as Nested will generate one url.
         """
-        def get_nested_url(nested_name):
+        def get_nested_url_detail(nested_name):
+            return url(r"^(?P<resource_name>%s)/(?P<%s>%s)/"
+                        r"(?P<nested_name>%s)/(?P<%s>%s)%s$" %
+                       (self._meta.resource_name,
+                        self._meta.detail_uri_name,
+                        self.get_detail_uri_name_regex(),
+                        nested_name,
+                        'nested_pk',
+                        self.get_detail_uri_name_regex(),
+                        trailing_slash()),
+                       self.wrap_view('dispatch_nested_detail'),
+                       name='api_dispatch_nested_detail')
+
+        def get_nested_url_list(nested_name):
             return url(r"^(?P<resource_name>%s)/(?P<%s>%s)/"
                         r"(?P<nested_name>%s)%s$" %
                        (self._meta.resource_name,
@@ -133,8 +146,10 @@ class ExtendedModelResource(ModelResource):
                        self.wrap_view('dispatch_nested'),
                        name='api_dispatch_nested')
 
-        return [get_nested_url(nested_name)
-                for nested_name in self._nested.keys()]
+        urls =  [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
+        [urls.append(get_nested_url_detail(nested_name)) for nested_name in self._nested.keys()]
+
+        return urls
 
     def detail_actions(self):
         """
@@ -316,6 +331,14 @@ class ExtendedModelResource(ModelResource):
         Performs authorization checks in every case.
         """
         try:
+
+            if 'child_object' in kwargs:
+                try:
+                    object_list = self.get_obj_from_parent_kwargs(kwargs)
+                    kwargs = self.real_remove_api_resource_names(kwargs)
+                except AttributeError:
+                    raise NotFound('Could not find child object for this resource')
+
             base_object_list = self.get_object_list(request).filter(
                                 **self.real_remove_api_resource_names(kwargs))
 
@@ -358,14 +381,85 @@ class ExtendedModelResource(ModelResource):
         """
         A ORM-specific implementation of ``obj_create``.
         """
-        kwargs = self.real_remove_api_resource_names(kwargs)
-        return super(ExtendedModelResource, self).obj_create(bundle, request,
+
+        if 'parent_resource' in kwargs:
+
+            manager = kwargs.pop('related_manager', None)
+            parent_object = kwargs.pop('parent_object', None)
+            fields = manager.core_filters.keys()
+
+            if len(fields) > 1:
+                raise BadRequest("Couldn't identify relationship")
+
+            field_name = fields[0].split('__')[0]
+
+
+            if manager is None or field_name is None or parent_object is None:
+                 raise BadRequest("Couldn't identify relationship")
+
+            bundle.obj = self._meta.object_class()
+
+            setattr(bundle.obj, field_name, parent_object )
+
+
+
+            for key, value in kwargs.items():
+                if key.startswith(field_name+'__') or key == field_name:
+                    continue
+                setattr(bundle.obj, key, value)
+
+
+            bundle = self.full_hydrate(bundle)
+            self.is_valid(bundle, request)
+
+            if bundle.errors:
+                self.error_response(bundle.errors, request)
+
+            # Save FKs just in case.
+            self.save_related(bundle)
+
+            # Save parent, using the related manager!
+            manager.add(bundle.obj)
+
+            # Now pick up the M2M bits.
+            m2m_bundle = self.hydrate_m2m(bundle)
+            self.save_m2m(m2m_bundle)
+            return bundle
+        else:
+            kwargs = self.real_remove_api_resource_names(kwargs)
+            return super(ExtendedModelResource, self).obj_create(bundle, request,
                                                              **kwargs)
+
+    def get_obj_from_parent_kwargs(self, kwargs):
+
+        # If we have an pk, we've been asked to filter for a specific id
+        if 'pk' in kwargs:
+            manager = kwargs.pop('child_object', None)
+            try:
+                return manager.get(pk=kwargs.pop('pk', None))
+            except self._meta.object_class.DoesNotExist:
+                raise BadRequest("Child object could not be found")
+        else:
+            obj = kwargs.pop('child_object', None)
+
+            if not isinstance(obj, self._meta.object_class):
+                raise BadRequest("Child object could not be found.")
+
+            return obj
+
 
     def obj_update(self, bundle, request=None, skip_errors=False, **kwargs):
         """
-        A ORM-specific implementation of ``obj_update``.
+        Check if we're nested. If we are, check that we're updating a child that's related to the parent.
+        If not return 404
         """
+        # Are we nested?
+        if 'child_object' in kwargs:
+            try:
+                bundle.obj = self.get_obj_from_parent_kwargs(kwargs)
+            except AttributeError:
+                raise BadRequest('Could not find child object for this resource')
+
         kwargs = self.real_remove_api_resource_names(kwargs)
         return super(ExtendedModelResource, self).obj_update(bundle, request,
                                             skip_errors=skip_errors, **kwargs)
@@ -395,8 +489,17 @@ class ExtendedModelResource(ModelResource):
         Takes optional ``kwargs``, which are used to narrow the query to find
         the instance.
         """
-        kwargs = self.real_remove_api_resource_names(kwargs)
-        obj = kwargs.pop('_obj', None)
+        # Are we nested?
+        if 'child_object' in kwargs:
+            try:
+                obj = self.get_obj_from_parent_kwargs(kwargs)
+                kwargs = self.real_remove_api_resource_names(kwargs)
+            except AttributeError:
+                raise NotFound('Could not find child object for this resource')
+
+        else:
+            kwargs = self.real_remove_api_resource_names(kwargs)
+            obj = kwargs.pop('_obj', None)
 
         if not hasattr(obj, 'delete'):
             try:
@@ -464,6 +567,11 @@ class ExtendedModelResource(ModelResource):
                     kwargs.get('parent_object', None),
                     kwargs.get('nested_name', None))
 
+
+    def dispatch_nested_detail(self, request, **kwargs):
+        return self.dispatch_nested(request, **kwargs)
+
+
     def dispatch_nested(self, request, **kwargs):
         """
         Dispatch a request to the nested resource.
@@ -475,6 +583,7 @@ class ExtendedModelResource(ModelResource):
         self.throttle_check(request)
 
         nested_name = kwargs.pop('nested_name')
+        nested_pk = kwargs.pop('nested_pk', None)
         nested_field = self._nested[nested_name]
 
         try:
@@ -512,11 +621,15 @@ class ExtendedModelResource(ModelResource):
             pass
 
         kwargs['nested_name'] = nested_name
+        kwargs['nested_field_name'] = nested_field.attribute
         kwargs['parent_resource'] = self
         kwargs['parent_object'] = obj
 
-        if manager is None or not hasattr(manager, 'all'):
+
+        if manager is None or not hasattr(manager, 'all') or nested_pk is not None:
             dispatch_type = 'detail'
+            if nested_pk is not None:
+                kwargs['pk'] = nested_pk
             kwargs['child_object'] = manager
         else:
             dispatch_type = 'list'
@@ -594,6 +707,53 @@ class ExtendedModelResource(ModelResource):
 
         return response
 
+
+    def put_detail(self, request, update_only=False, **kwargs):
+        """
+        Either updates an existing resource or creates a new one with the
+        provided data.
+
+        Calls ``obj_update`` with the provided data first, but falls back to
+        ``obj_create`` if the object does not already exist.
+
+        If a new resource is created, return ``HttpCreated`` (201 Created).
+        If ``Meta.always_return_data = True``, there will be a populated body
+        of serialized data.
+
+        If an existing resource is modified and
+        ``Meta.always_return_data = False`` (default), return ``HttpNoContent``
+        (204 No Content).
+        If an existing resource is modified and
+        ``Meta.always_return_data = True``, return ``HttpAccepted`` (202
+        Accepted).
+        """
+        deserialized = self.deserialize(request, request.raw_post_data, format=request.META.get('CONTENT_TYPE', 'application/json'))
+        deserialized = self.alter_deserialized_detail_data(request, deserialized)
+        bundle = self.build_bundle(data=dict_strip_unicode_keys(deserialized), request=request)
+
+        try:
+            updated_bundle = self.obj_update(bundle, request=request, **self.remove_api_resource_names(kwargs))
+
+            if not self._meta.always_return_data:
+                return http.HttpNoContent()
+            else:
+                updated_bundle = self.full_dehydrate(updated_bundle)
+                updated_bundle = self.alter_detail_data_to_serialize(request, updated_bundle)
+                return self.create_response(request, updated_bundle, response_class=http.HttpAccepted)
+        except (NotFound, MultipleObjectsReturned):
+            if not update_only:
+                updated_bundle = self.obj_create(bundle, request=request, **self.remove_api_resource_names(kwargs))
+                location = self.get_resource_uri(updated_bundle)
+
+                if not self._meta.always_return_data:
+                    return http.HttpCreated(location=location)
+                else:
+                    updated_bundle = self.full_dehydrate(updated_bundle)
+                    updated_bundle = self.alter_detail_data_to_serialize(request, updated_bundle)
+                    return self.create_response(request, updated_bundle, response_class=http.HttpCreated, location=location)
+            else:
+                raise NotFound
+
     def get_detail(self, request, **kwargs):
         """
         Returns a single serialized resource.
@@ -606,10 +766,12 @@ class ExtendedModelResource(ModelResource):
         try:
             # If call was made through Nested we should already have the
             # child object.
+        # Are we nested?
             if 'child_object' in kwargs:
-                obj = kwargs.pop('child_object', None)
-                if obj is None:
-                    return http.HttpNotFound()
+                try:
+                    obj = self.get_obj_from_parent_kwargs(kwargs)
+                except AttributeError:
+                    raise NotFound('Could not find child object for this resource')
             else:
                 obj = self.cached_obj_get(request=request,
                                     **self.remove_api_resource_names(kwargs))
@@ -628,14 +790,8 @@ class ExtendedModelResource(ModelResource):
 
     def post_list(self, request, **kwargs):
         """
-        Unsupported if used as nested. Otherwise, same as original.
+        We manage nested creation inside create_object
         """
-        if 'parent_resource' in kwargs:
-            raise NotImplementedError('You cannot post a list on a nested'
-                                      ' resource.')
-
-        # TODO: support this & link with the parent (consider core_filters of
-        #       the related manager to know which attribute to set.
         return super(ExtendedModelResource, self).post_list(request, **kwargs)
 
     def put_list(self, request, **kwargs):
