@@ -7,7 +7,7 @@ except ImportError:
     use_setuptools()
     from setuptools import setup
 
-VERSION = '0.22-dev'
+VERSION = '0.22-dev-1'
 
 if __name__ == '__main__':
     setup(
