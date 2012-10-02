@@ -386,25 +386,27 @@ class ExtendedModelResource(ModelResource):
 
             manager = kwargs.pop('related_manager', None)
             parent_object = kwargs.pop('parent_object', None)
+            parent_resource = kwargs.pop('parent_resource', None)
+            field_name = kwargs.pop('nested_field_name', None)
             fields = manager.core_filters.keys()
 
-            if len(fields) > 1:
-                raise BadRequest("Couldn't identify relationship")
+            child_object_attribute = None
 
-            field_name = fields[0].split('__')[0]
+            if hasattr(parent_resource._meta, 'nested_generic_fields'):
+                if field_name in parent_resource._meta.nested_generic_fields:
+                    child_object_attribute = parent_resource._meta.nested_generic_fields[field_name]
 
+            if len(fields) == 1:
+                child_object_attribute = fields[0].split('__')[0]
 
-            if manager is None or field_name is None or parent_object is None:
+            if manager is None or child_object_attribute is None or parent_object is None:
                  raise BadRequest("Couldn't identify relationship")
 
             bundle.obj = self._meta.object_class()
-
-            setattr(bundle.obj, field_name, parent_object )
-
-
+            setattr(bundle.obj, child_object_attribute, parent_object)
 
             for key, value in kwargs.items():
-                if key.startswith(field_name+'__') or key == field_name:
+                if key.startswith(child_object_attribute+'__') or key == child_object_attribute:
                     continue
                 setattr(bundle.obj, key, value)
 
@@ -429,6 +431,7 @@ class ExtendedModelResource(ModelResource):
             kwargs = self.real_remove_api_resource_names(kwargs)
             return super(ExtendedModelResource, self).obj_create(bundle, request,
                                                              **kwargs)
+
 
     def get_obj_from_parent_kwargs(self, kwargs):
 
