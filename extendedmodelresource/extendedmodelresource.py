@@ -1,13 +1,49 @@
 from django.http import HttpResponse, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
-from django.core.urlresolvers import get_script_prefix, resolve, Resolver404
+from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
 from django.conf.urls.defaults import patterns, url, include
 
 from tastypie import fields, http
+from tastypie.bundle import Bundle
 from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
 from tastypie.resources import ResourceOptions, ModelDeclarativeMetaclass, \
     ModelResource, convert_post_to_put
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
+
+
+class NestedToManyField(fields.ToManyField):
+    """
+    Like tastypies's ToManyField but makes the resource_uri correct for nested resources.
+    """
+
+    def dehydrate(self, bundle):
+        if not bundle.obj or not bundle.obj.pk:
+            if not self.null:
+                raise ApiFieldError(
+                    "The model '%r' does not have a primary key and can not be used in a ToMany context." % bundle.obj)
+
+            return []
+        self.parent_object = bundle.obj
+        return super(NestedToManyField, self).dehydrate(bundle)
+
+
+    def dehydrate_related(self, bundle, related_resource):
+        """
+        Based on the ``full_resource``, returns either the endpoint or the data
+        from ``full_dehydrate`` for the related resource.
+        """
+
+        related_resource.parent_resource = self._resource
+        related_resource.parent_object = self.parent_object
+        related_resource.nested_resource_name = self.attribute
+
+        if not self.full:
+            # Be a good netizen.
+            return related_resource.get_resource_uri(bundle)
+        else:
+            # ZOMG extra data and big payloads.
+            bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+            return related_resource.full_dehydrate(bundle)
 
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
@@ -53,6 +89,17 @@ class ExtendedModelResource(ModelResource):
         """
         return url_dict.copy()
 
+
+    def get_detail_uri_name_regex(self):
+        """
+        Return the regular expression to which the id attribute used in
+        resource URLs should match.
+
+        By default we admit any alphanumeric value and "-", but you may
+        override this function and provide your own.
+        """
+        return r'\w[\w-]*'
+
     def real_remove_api_resource_names(self, url_dict):
         """
         Given a dictionary of regex matches from a URLconf, removes
@@ -65,25 +112,97 @@ class ExtendedModelResource(ModelResource):
         """
         kwargs_subset = url_dict.copy()
 
-        for key in ['api_name', 'resource_name', 'related_manager',
-                    'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
-                    'parent_object']:
+        exclude_keys = ['api_name', 'resource_name', 'related_manager',
+         'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
+         'parent_object']
+
+        related_keys_search = []
+
+        if 'related_manager' in kwargs_subset.keys():
+            manager = kwargs_subset['related_manager']
+            if hasattr(manager, "content_type_field_name"):
+                exclude_keys.append(manager.content_type_field_name)
+                related_keys_search.append(manager.content_type_field_name)
+
+            if hasattr(manager, "object_id_field_name"):
+                exclude_keys.append(manager.object_id_field_name)
+                related_keys_search.append(manager.object_id_field_name)
+
+
+        for key in exclude_keys:
             try:
                 del(kwargs_subset[key])
             except KeyError:
                 pass
 
+        for key in related_keys_search:
+            for key2 in kwargs_subset.keys():
+                if key2.startswith(key+'__'):
+                    del(kwargs_subset[key2])
+
+
         return kwargs_subset
 
-    def get_detail_uri_name_regex(self):
-        """
-        Return the regular expression to which the id attribute used in
-        resource URLs should match.
 
-        By default we admit any alphanumeric value and "-", but you may
-        override this function and provide your own.
+    def detail_nested_uri_kwargs(self, bundle_or_obj):
+
+        kwargs = { }
+
+        if bundle_or_obj is not None:
+            if isinstance(bundle_or_obj, Bundle):
+                kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj.obj, 'pk')
+            else:
+                kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
+
+        if hasattr(self, 'parent_object') and hasattr(self, 'parent_resource'):
+            kwargs[self.parent_resource._meta.detail_uri_name] = getattr(self.parent_object, self.parent_resource._meta.detail_uri_name)
+
+        return kwargs
+
+
+    def resource_uri_kwargs(self, bundle_or_obj=None):
         """
-        return r'\w[\w-]*'
+        Builds a dictionary of kwargs to help generate URIs.
+
+        Automatically provides the ``Resource.Meta.resource_name`` (and
+        optionally the ``Resource.Meta.api_name`` if populated by an ``Api``
+        object).
+
+        If the ``bundle_or_obj`` argument is provided, it calls
+        ``Resource.detail_uri_kwargs`` for additional bits to create
+        """
+        kwargs = {}
+        if self._meta.api_name is not None:
+            kwargs['api_name'] = self._meta.api_name
+
+        if hasattr(self, 'parent_resource'):
+            kwargs['nested_name'] = getattr(self, 'nested_resource_name', None)
+            kwargs['resource_name'] = self.parent_resource._meta.resource_name
+            kwargs.update(self.detail_nested_uri_kwargs(bundle_or_obj))
+        else:
+            kwargs['resource_name'] = self._meta.resource_name
+            if bundle_or_obj is not None:
+                kwargs.update(self.detail_uri_kwargs(bundle_or_obj))
+
+        return kwargs
+
+
+    def get_resource_uri(self, bundle_or_obj=None, url_name='api_dispatch_list'):
+
+        if hasattr(self, 'parent_resource'):
+            if bundle_or_obj is not None:
+                url_name = 'api_dispatch_nested_detail'
+            else:
+                url_name = 'api_dispatch_nested_list'
+        else:
+            if bundle_or_obj is not None:
+                url_name = 'api_dispatch_detail'
+        try:
+            kwargs = self.resource_uri_kwargs(bundle_or_obj)
+            url = self._build_reverse_url(url_name, kwargs=kwargs)
+            return url
+        except NoReverseMatch:
+           return ''
 
     def base_urls(self):
         """
@@ -144,11 +263,10 @@ class ExtendedModelResource(ModelResource):
                         nested_name,
                         trailing_slash()),
                        self.wrap_view('dispatch_nested'),
-                       name='api_dispatch_nested')
+                       name='api_dispatch_nested_list')
 
         urls =  [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
         [urls.append(get_nested_url_detail(nested_name)) for nested_name in self._nested.keys()]
-
         return urls
 
     def detail_actions(self):
@@ -173,21 +291,6 @@ class ExtendedModelResource(ModelResource):
         """
         return []
 
-    def detail_actions_urlpatterns(self):
-        """
-        Return the url patterns corresponding to the detail actions available
-        on this resource.
-        """
-        if self.detail_actions():
-            detail_url = "^(?P<resource_name>%s)/(?P<%s>%s)/" % (
-                            self._meta.resource_name,
-                            self._meta.detail_uri_name,
-                            self.get_detail_uri_name_regex()
-            )
-            return patterns('', (detail_url, include(self.detail_actions())))
-
-        return []
-
     @property
     def urls(self):
         """
@@ -197,7 +300,7 @@ class ExtendedModelResource(ModelResource):
         well as detail actions urls.
         """
         urls = self.prepend_urls() + self.base_urls() + self.nested_urls()
-        return patterns('', *urls) + self.detail_actions_urlpatterns()
+        return patterns('', *urls)
 
     def is_authorized_over_parent(self, request, parent_object):
         """
@@ -207,9 +310,12 @@ class ExtendedModelResource(ModelResource):
         Will call the ``is_authorized_parent`` function of the
         ``Authorization`` class.
         """
+
         if hasattr(self._meta.authorization, 'is_authorized_parent'):
             return self._meta.authorization.is_authorized_parent(request,
                         parent_object)
+        else:
+            raise NotImplementedError("'is_authorized_parent' could not be found on the Resources Authorization class. Please implement this function.")
 
         return True
 
@@ -224,7 +330,6 @@ class ExtendedModelResource(ModelResource):
         kwargs = self.real_remove_api_resource_names(kwargs)
         parent_object = self.get_object_list(request).get(**kwargs)
 
-        # If I am not authorized for the parent
         if not self.is_authorized_over_parent(request, parent_object):
             stringified_kwargs = ', '.join(["%s=%s" % (k, v)
                                             for k, v in kwargs.items()])
@@ -381,20 +486,25 @@ class ExtendedModelResource(ModelResource):
         """
         A ORM-specific implementation of ``obj_create``.
         """
-
         if 'parent_resource' in kwargs:
 
             manager = kwargs.pop('related_manager', None)
             parent_object = kwargs.pop('parent_object', None)
             parent_resource = kwargs.pop('parent_resource', None)
             field_name = kwargs.pop('nested_field_name', None)
+            nested_name = kwargs.pop('nested_name', None)
+
             fields = manager.core_filters.keys()
 
             child_object_attribute = None
 
             if hasattr(parent_resource._meta, 'nested_generic_fields'):
-                if field_name in parent_resource._meta.nested_generic_fields:
-                    child_object_attribute = parent_resource._meta.nested_generic_fields[field_name]
+                if isinstance(parent_resource._meta.nested_generic_fields, tuple):
+                    if field_name in parent_resource._meta.nested_generic_fields[0]:
+                        child_object_attribute = parent_resource._meta.nested_generic_fields[0][field_name]
+                elif isinstance(parent_resource._meta.nested_generic_fields, dict):
+                    if field_name in parent_resource._meta.nested_generic_fields:
+                        child_object_attribute = parent_resource._meta.nested_generic_fields[field_name]
 
             if len(fields) == 1:
                 child_object_attribute = fields[0].split('__')[0]
@@ -402,14 +512,30 @@ class ExtendedModelResource(ModelResource):
             if manager is None or child_object_attribute is None or parent_object is None:
                  raise BadRequest("Couldn't identify relationship")
 
-            bundle.obj = self._meta.object_class()
+            if bundle.obj is None:
+                raise BadRequest("Coludn't create a base object.")
             setattr(bundle.obj, child_object_attribute, parent_object)
 
-            for key, value in kwargs.items():
-                if key.startswith(child_object_attribute+'__') or key == child_object_attribute:
-                    continue
-                setattr(bundle.obj, key, value)
+            exclude_keys = [child_object_attribute]
 
+            if hasattr(manager, "content_type_field_name"):
+                exclude_keys.append(manager.content_type_field_name)
+
+            if hasattr(manager, "object_id_field_name"):
+                exclude_keys.append(manager.object_id_field_name)
+
+
+            for key in exclude_keys:
+                if key in kwargs:
+                    kwargs.pop(key)
+                    continue
+                for key2 in kwargs.keys():
+                    if key2.startswith(key+'__'):
+                       kwargs.pop(key2)
+                       continue
+
+            for key, value in kwargs.items():
+                setattr(bundle.obj, key, value)
 
             bundle = self.full_hydrate(bundle)
             self.is_valid(bundle, request)
@@ -694,6 +820,10 @@ class ExtendedModelResource(ModelResource):
             self.is_authorized_nested(request, kwargs['nested_name'],
                                       parent_resource,
                                       kwargs['parent_object'])
+            self.parent_resource = parent_resource
+            self.parent_object = kwargs['parent_object']
+
+            self.nested_resource_name = kwargs['nested_name']
 
         # All clear. Process the request.
         request = convert_post_to_put(request)
