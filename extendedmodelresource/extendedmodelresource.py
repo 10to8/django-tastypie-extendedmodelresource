@@ -482,6 +482,29 @@ class ExtendedModelResource(ModelResource):
 
         return bundle
 
+
+    def is_valid(self, bundle, request=None):
+        """
+        Handles checking if the data provided by the user is valid.
+
+        Mostly a hook, this uses class assigned to ``validation`` from
+        ``Resource._meta``.
+
+        If validation fails, an error is raised with the error messages
+        serialized inside it.
+        """
+        if request:
+            # Run is authorized again, but this time with the object.
+            self.is_authorized(request, bundle.obj)
+
+        errors = self._meta.validation.is_valid(bundle, request)
+
+        if errors:
+            bundle.errors[self._meta.resource_name] = errors
+            return False
+
+        return True
+
     def obj_create(self, bundle, request=None, **kwargs):
         """
         A ORM-specific implementation of ``obj_create``.
