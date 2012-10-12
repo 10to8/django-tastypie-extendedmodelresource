@@ -2,7 +2,7 @@ from django.http import HttpResponse, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
 from django.conf.urls.defaults import patterns, url, include
-
+from django.db.models import Q
 from tastypie import fields, http
 from tastypie.bundle import Bundle
 from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
@@ -89,6 +89,9 @@ class ExtendedModelResource(ModelResource):
         """
         return url_dict.copy()
 
+    def get_nested_uri_name_regex(self):
+
+        return self.get_detail_uri_name_regex()
 
     def get_detail_uri_name_regex(self):
         """
@@ -98,7 +101,7 @@ class ExtendedModelResource(ModelResource):
         By default we admit any alphanumeric value and "-", but you may
         override this function and provide your own.
         """
-        return r'\w[\w-]*'
+        return r'\d*'
 
     def real_remove_api_resource_names(self, url_dict):
         """
@@ -241,7 +244,13 @@ class ExtendedModelResource(ModelResource):
 
         Each resource listed as Nested will generate one url.
         """
-        def get_nested_url_detail(nested_name):
+        def get_nested_url_detail(nested_name, field=None):
+
+            if field is not None:
+                nested_uri_name_regex = field.to_class().get_nested_uri_name_regex()
+            else:
+                nested_uri_name_regex = self.get_nested_uri_name_regex()
+
             return url(r"^(?P<resource_name>%s)/(?P<%s>%s)/"
                         r"(?P<nested_name>%s)/(?P<%s>%s)%s$" %
                        (self._meta.resource_name,
@@ -249,7 +258,7 @@ class ExtendedModelResource(ModelResource):
                         self.get_detail_uri_name_regex(),
                         nested_name,
                         'nested_pk',
-                        self.get_detail_uri_name_regex(),
+                        nested_uri_name_regex,
                         trailing_slash()),
                        self.wrap_view('dispatch_nested_detail'),
                        name='api_dispatch_nested_detail')
@@ -266,8 +275,9 @@ class ExtendedModelResource(ModelResource):
                        name='api_dispatch_nested_list')
 
         urls =  [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
-        [urls.append(get_nested_url_detail(nested_name)) for nested_name in self._nested.keys()]
+        [urls.append(get_nested_url_detail(nested_name, self._nested[nested_name])) for nested_name in self._nested.keys()]
         return urls
+
 
     def detail_actions(self):
         """
@@ -403,6 +413,16 @@ class ExtendedModelResource(ModelResource):
         return self.obj_get_no_auth_check(request=request,
                         **self.remove_api_resource_names(kwargs))
 
+
+    def obj_search(self, query, object_list, **kwargs):
+        if not hasattr(self._meta, 'searching'):
+            raise BadRequest("Searching is disabled for this resource.")
+        q = Q()
+        for item in self._meta.searching:
+            q = (q | Q(**{item: query}))
+
+        return object_list.filter(q)
+
     def obj_get_list(self, request=None, **kwargs):
         """
         A ORM-specific implementation of ``obj_get_list``.
@@ -411,10 +431,16 @@ class ExtendedModelResource(ModelResource):
         used to narrow the query.
         """
         filters = {}
+        search = False
+
 
         if hasattr(request, 'GET'):
             # Grab a mutable copy.
             filters = request.GET.copy()
+            if 'q' in request.GET.keys():
+                search = True
+                query = request.GET['q']
+                del(filters['q'])
 
         # Update with the provided kwargs.
         filters.update(self.real_remove_api_resource_names(kwargs))
@@ -422,6 +448,8 @@ class ExtendedModelResource(ModelResource):
 
         try:
             base_object_list = self.apply_filters(request, applicable_filters)
+            if search:
+                base_object_list = self.obj_search(query, base_object_list, **kwargs)
             return self.apply_proper_authorization_limits(request,
                                                 base_object_list, **kwargs)
         except ValueError:
@@ -585,10 +613,11 @@ class ExtendedModelResource(ModelResource):
     def get_obj_from_parent_kwargs(self, kwargs):
 
         # If we have an pk, we've been asked to filter for a specific id
+        # TODO: this should be 'nested_pk' rather than 'pk'.  I think.
         if 'pk' in kwargs:
             manager = kwargs.pop('child_object', None)
             try:
-                return manager.get(pk=kwargs.pop('pk', None))
+                return manager.get(pk=kwargs.pop('nested_pk', None))
             except self._meta.object_class.DoesNotExist:
                 raise BadRequest("Child object could not be found")
         else:
@@ -780,8 +809,9 @@ class ExtendedModelResource(ModelResource):
 
         if manager is None or not hasattr(manager, 'all') or nested_pk is not None:
             dispatch_type = 'detail'
-            if nested_pk is not None:
-                kwargs['pk'] = nested_pk
+#            if nested_pk is not None:
+            kwargs['parent_pk'] = kwargs['pk']
+            kwargs['pk'] = nested_pk
             kwargs['child_object'] = manager
         else:
             dispatch_type = 'list'
