@@ -45,12 +45,14 @@ class NestedToManyField(fields.ToManyField):
             bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
             return related_resource.full_dehydrate(bundle)
 
-
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     """
     Same as ``DeclarativeMetaclass`` but uses ``AnyIdAttributeResourceOptions``
     instead of ``ResourceOptions`` and adds support for multiple nested fields
     defined in a "Nested" class (the same way as "Meta") inside the resources.
+    
+    TODO: Fix this comment. It doesn't match the code. Where is 
+    AnyIdAttributeResourceOptions??
     """
 
     def __new__(cls, name, bases, attrs):
@@ -140,7 +142,7 @@ class ExtendedModelResource(ModelResource):
 
         for key in related_keys_search:
             for key2 in kwargs_subset.keys():
-                if key2.startswith(key+'__'):
+                if key2.startswith(key + '__'):
                     del(kwargs_subset[key2])
 
 
@@ -274,7 +276,7 @@ class ExtendedModelResource(ModelResource):
                        self.wrap_view('dispatch_nested'),
                        name='api_dispatch_nested_list')
 
-        urls =  [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
+        urls = [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
         [urls.append(get_nested_url_detail(nested_name, self._nested[nested_name])) for nested_name in self._nested.keys()]
         return urls
 
@@ -467,7 +469,7 @@ class ExtendedModelResource(ModelResource):
 
             if 'child_object' in kwargs:
                 try:
-                    object_list = self.get_obj_from_parent_kwargs(kwargs)
+                    object_list = self.get_obj_from_parent_kwargs(**kwargs)
                     kwargs = self.real_remove_api_resource_names(kwargs)
                 except AttributeError:
                     raise NotFound('Could not find child object for this resource')
@@ -581,7 +583,7 @@ class ExtendedModelResource(ModelResource):
                     kwargs.pop(key)
                     continue
                 for key2 in kwargs.keys():
-                    if key2.startswith(key+'__'):
+                    if key2.startswith(key + '__'):
                        kwargs.pop(key2)
                        continue
 
@@ -610,14 +612,21 @@ class ExtendedModelResource(ModelResource):
                                                              **kwargs)
 
 
-    def get_obj_from_parent_kwargs(self, kwargs):
+    def get_obj_from_parent_kwargs(self, **kwargs):
 
-        # If we have an pk, we've been asked to filter for a specific id
-        # TODO: this should be 'nested_pk' rather than 'pk'.  I think.
-        if 'pk' in kwargs:
+        # RDH: Note: this should be called after (from) dispatch_nested, since
+        # that method creates the pk (from nested_pk) and parent_pk fields, and 
+        # removes nested_pk. For the time being, to make sure we're being called 
+        # correctly:
+        if 'nested_pk' in kwargs:
+            raise ValueError("We were called with nested_pk, instead of pk and parent_pk")
+
+        # Also, why are we popping everything out of dicts? Immutability = Good
+
+        if kwargs.get('pk', None) is not None:
             manager = kwargs.pop('child_object', None)
             try:
-                return manager.get(pk=kwargs.pop('nested_pk', None))
+                return manager.get(pk=kwargs.pop('pk', None))
             except self._meta.object_class.DoesNotExist:
                 raise BadRequest("Child object could not be found")
         else:
@@ -637,7 +646,7 @@ class ExtendedModelResource(ModelResource):
         # Are we nested?
         if 'child_object' in kwargs:
             try:
-                bundle.obj = self.get_obj_from_parent_kwargs(kwargs)
+                bundle.obj = self.get_obj_from_parent_kwargs(**kwargs)
             except AttributeError:
                 raise BadRequest('Could not find child object for this resource')
 
@@ -673,7 +682,7 @@ class ExtendedModelResource(ModelResource):
         # Are we nested?
         if 'child_object' in kwargs:
             try:
-                obj = self.get_obj_from_parent_kwargs(kwargs)
+                obj = self.get_obj_from_parent_kwargs(**kwargs)
                 kwargs = self.real_remove_api_resource_names(kwargs)
             except AttributeError:
                 raise NotFound('Could not find child object for this resource')
@@ -955,7 +964,7 @@ class ExtendedModelResource(ModelResource):
         # Are we nested?
             if 'child_object' in kwargs:
                 try:
-                    obj = self.get_obj_from_parent_kwargs(kwargs)
+                    obj = self.get_obj_from_parent_kwargs(**kwargs)
                 except AttributeError:
                     raise NotFound('Could not find child object for this resource')
             else:
