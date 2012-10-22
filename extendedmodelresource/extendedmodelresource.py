@@ -154,11 +154,13 @@ class ExtendedModelResource(ModelResource):
         kwargs = { }
 
         if bundle_or_obj is not None:
-            if isinstance(bundle_or_obj, Bundle):
-                kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj.obj, 'pk')
-            else:
-                kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
-
+            try:
+                if isinstance(bundle_or_obj, Bundle):
+                    kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj.obj, 'pk')
+                else:
+                    kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
+            except AttributeError:
+                raise ImmediateHttpResponse(ServerError("Missing 'nesteed_detail_uri_name' on resource %s meta" % (self.__name__)))
         if hasattr(self, 'parent_object') and hasattr(self, 'parent_resource'):
             kwargs[self.parent_resource._meta.detail_uri_name] = getattr(self.parent_object, self.parent_resource._meta.detail_uri_name)
 
@@ -628,12 +630,12 @@ class ExtendedModelResource(ModelResource):
             try:
                 return manager.get(pk=kwargs.pop('pk', None))
             except self._meta.object_class.DoesNotExist:
-                raise BadRequest("Child object could not be found")
+                raise NotFound("Child object could not be found")
         else:
             obj = kwargs.pop('child_object', None)
 
             if not isinstance(obj, self._meta.object_class):
-                raise BadRequest("Child object could not be found.")
+                raise NotFound("Child object could not be found.")
 
             return obj
 
