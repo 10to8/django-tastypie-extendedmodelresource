@@ -515,7 +515,7 @@ class ExtendedModelResource(ModelResource):
         return bundle
 
 
-    def is_valid(self, bundle, request=None):
+    def is_valid(self, bundle, request=None, run_authorization=True):
         """
         Handles checking if the data provided by the user is valid.
 
@@ -525,7 +525,7 @@ class ExtendedModelResource(ModelResource):
         If validation fails, an error is raised with the error messages
         serialized inside it.
         """
-        if request:
+        if request and run_authorization:
             # Run is authorized again, but this time with the object.
             self.is_authorized(request, bundle.obj)
 
@@ -539,7 +539,12 @@ class ExtendedModelResource(ModelResource):
 
     def obj_create(self, bundle, request=None, **kwargs):
         """
-        A ORM-specific implementation of ``obj_create``.
+        Nested version of object create.
+
+        We need to validate the parent and save the clild in a different way (using the RelationshipManager).
+
+        We also watch for our 'fail silently check' on the following exceptions:
+
         """
         if 'parent_resource' in kwargs:
 
