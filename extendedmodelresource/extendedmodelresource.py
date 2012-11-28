@@ -121,17 +121,17 @@ class ExtendedModelResource(ModelResource):
          'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
          'parent_object']
 
-        related_keys_search = []
+        #related_keys_search = []
 
-        if 'related_manager' in kwargs_subset.keys():
-            manager = kwargs_subset['related_manager']
-            if hasattr(manager, "content_type_field_name"):
-                exclude_keys.append(manager.content_type_field_name)
-                related_keys_search.append(manager.content_type_field_name)
-
-            if hasattr(manager, "object_id_field_name"):
-                exclude_keys.append(manager.object_id_field_name)
-                related_keys_search.append(manager.object_id_field_name)
+        #if 'related_manager' in kwargs_subset.keys():
+        #    manager = kwargs_subset['related_manager']
+        #    if hasattr(manager, "content_type_field_name"):
+        #        exclude_keys.append(manager.content_type_field_name)
+        #        related_keys_search.append(manager.content_type_field_name)
+        #
+        #    if hasattr(manager, "object_id_field_name"):
+        #        exclude_keys.append(manager.object_id_field_name)
+        #        related_keys_search.append(manager.object_id_field_name)
 
 
         for key in exclude_keys:
@@ -140,10 +140,10 @@ class ExtendedModelResource(ModelResource):
             except KeyError:
                 pass
 
-        for key in related_keys_search:
-            for key2 in kwargs_subset.keys():
-                if key2.startswith(key + '__'):
-                    del(kwargs_subset[key2])
+        #for key in related_keys_search:
+        #    for key2 in kwargs_subset.keys():
+        #        if key2.startswith(key + '__'):
+        #            del(kwargs_subset[key2])
 
 
         return kwargs_subset
