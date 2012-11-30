@@ -347,9 +347,9 @@ class ExtendedModelResource(ModelResource):
         if not self.is_authorized_over_parent(request, parent_object):
             stringified_kwargs = ', '.join(["%s=%s" % (k, v)
                                             for k, v in kwargs.items()])
-            raise self._meta.object_class.DoesNotExist("Couldn't find an "
+            raise ImmediateHttpResponse(response=http.HttpUnauthorized("Authorisation failed for "
                     "instance of '%s' which matched '%s'." %
-                    (self._meta.object_class.__name__, stringified_kwargs))
+                    (self._meta.object_class.__name__, stringified_kwargs)))
 
         return parent_object
 
