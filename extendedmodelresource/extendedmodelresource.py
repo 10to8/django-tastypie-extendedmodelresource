@@ -50,7 +50,26 @@ class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     Same as ``DeclarativeMetaclass`` but uses ``AnyIdAttributeResourceOptions``
     instead of ``ResourceOptions`` and adds support for multiple nested fields
     defined in a "Nested" class (the same way as "Meta") inside the resources.
-    
+
+    Also generic relationship support.
+    WARNING, WARNING, you MUST create ``nested_generic_fields`` in the parents Meta if you use generic relationships.
+    Also if you don't use the default values for the three generic fields, you MUST set them.
+
+    The default values are in `:py:func:get_generic_fields`.
+
+    If you fail to do this YOU WILL RETURN ALL CHILD OBJECTS!
+
+    This is clearly a TODO: to secure.
+    ::
+        nested_generic_fields = {
+                                'numbers': True,
+                                'emails : {
+                                    'manager': 'my_manager',
+                                    'object_id': 'blah_bject_id',
+                                    'content_type': 'bloo_content_type'
+                                }
+                            },
+
     TODO: Fix this comment. It doesn't match the code. Where is 
     AnyIdAttributeResourceOptions??
     """
@@ -117,7 +136,7 @@ class ExtendedModelResource(ModelResource):
         """
         kwargs_subset = url_dict.copy()
 
-        exclude_keys = ['api_name', 'resource_name', 'related_manager',
+        exclude_keys = ['generic_fields','api_name', 'resource_name', 'related_manager',
          'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
          'parent_object']
 
@@ -445,10 +464,19 @@ class ExtendedModelResource(ModelResource):
                 search = True
                 query = request.GET['q']
                 del(filters['q'])
-
+        cleaned_kwargs = self.real_remove_api_resource_names(kwargs)
         # Update with the provided kwargs.
-        filters.update(self.real_remove_api_resource_names(kwargs))
+        filters.update(cleaned_kwargs)
         applicable_filters = self.build_filters(filters=filters)
+
+        generic_fields = kwargs.get('generic_fields')
+
+        if generic_fields:
+            fields = ('object_id', 'content_type')
+            for field in fields:
+                for kwarg in cleaned_kwargs.keys():
+                    if kwarg.startswith(field):
+                        applicable_filters[kwarg] = cleaned_kwargs[kwarg]
 
         try:
             base_object_list = self.apply_filters(request, applicable_filters)
@@ -558,13 +586,10 @@ class ExtendedModelResource(ModelResource):
 
             child_object_attribute = None
 
-            if hasattr(parent_resource._meta, 'nested_generic_fields'):
-                if isinstance(parent_resource._meta.nested_generic_fields, tuple):
-                    if field_name in parent_resource._meta.nested_generic_fields[0]:
-                        child_object_attribute = parent_resource._meta.nested_generic_fields[0][field_name]
-                elif isinstance(parent_resource._meta.nested_generic_fields, dict):
-                    if field_name in parent_resource._meta.nested_generic_fields:
-                        child_object_attribute = parent_resource._meta.nested_generic_fields[field_name]
+            generic_fields = kwargs.get('generic_fields')
+
+            if generic_fields:
+                child_object_attribute = generic_fields['manager']
 
             if len(fields) == 1:
                 child_object_attribute = fields[0].split('__')[0]
@@ -769,6 +794,23 @@ class ExtendedModelResource(ModelResource):
         return self.dispatch_nested(request, **kwargs)
 
 
+    def get_generic_fields(self, generic_field_details, field_name):
+
+        defaults = {
+            'manager': 'owner',
+            'object_id': 'object_id',
+            'content_type': 'content_type'
+        }
+
+        if isinstance(generic_field_details, dict):
+            for key in defaults.keys():
+                if key not in generic_field_details:
+                    generic_field_details[key] = defaults[key]
+            return generic_field_details
+
+        else:
+            return defaults
+
     def dispatch_nested(self, request, **kwargs):
         """
         Dispatch a request to the nested resource.
@@ -822,6 +864,10 @@ class ExtendedModelResource(ModelResource):
         kwargs['parent_resource'] = self
         kwargs['parent_object'] = obj
 
+        if hasattr(self._meta, 'nested_generic_fields'):
+            # Meta's being screwed around with... it's a tuple for some strange reason.... fixme...
+            if nested_name in self._meta.nested_generic_fields[0]:
+                kwargs['generic_fields'] = self.get_generic_fields(self._meta.nested_generic_fields[0][nested_name], nested_name)
 
         if manager is None or not hasattr(manager, 'all') or nested_pk is not None:
             dispatch_type = 'detail'
