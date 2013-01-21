@@ -19,38 +19,75 @@ class FullToManyField(fields.ToManyField):
 
     def __init__(self, *args, **kwargs):
         self.full_requestable = kwargs.pop('full_requstable', True)
+
         super(FullToManyField, self).__init__(*args, **kwargs
         )
 
     def dehydrate(self, bundle):
-
-        if self.full_requestable:
-            if getattr(bundle, 'full_depth', 0):
-                self.full_depth = int(bundle.full_depth)
-                self.full=True
-            else:
-                self.full_depth = 0
+        """
+        10to8 changes:
+            We pass on the full_depth to the m2m bundle.
+        """
 
         if not bundle.obj or not bundle.obj.pk:
             if not self.null:
-                raise ApiFieldError(
-                    "The model '%r' does not have a primary key and can not be used in a ToMany context." % bundle.obj)
+                raise ApiFieldError("The model '%r' does not have a primary key and can not be used in a ToMany context." % bundle.obj)
 
             return []
-        return super(FullToManyField, self).dehydrate(bundle)
+
+        the_m2ms = None
+        previous_obj = bundle.obj
+        attr = self.attribute
+
+        if isinstance(self.attribute, basestring):
+            attrs = self.attribute.split('__')
+            the_m2ms = bundle.obj
+
+            for attr in attrs:
+                previous_obj = the_m2ms
+                try:
+                    the_m2ms = getattr(the_m2ms, attr, None)
+                except ObjectDoesNotExist:
+                    the_m2ms = None
+
+                if not the_m2ms:
+                    break
+
+        elif callable(self.attribute):
+            the_m2ms = self.attribute(bundle)
+
+        if not the_m2ms:
+            if not self.null:
+                raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
+
+            return []
+
+        self.m2m_resources = []
+        m2m_dehydrated = []
+
+        # TODO: Also model-specific and leaky. Relies on there being a
+        #       ``Manager`` there.
+        for m2m in the_m2ms.all():
+            m2m_resource = self.get_related_resource(m2m)
+            m2m_bundle = Bundle(obj=m2m, request=bundle.request)
+            m2m_bundle.full_depth = max(getattr(bundle,'full_depth', 0), 0)
+
+            self.m2m_resources.append(m2m_resource)
+            m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource))
+
+        return m2m_dehydrated
+
 
     def dehydrate_related(self, bundle, related_resource):
         """
         Based on the ``full_resource``, returns either the endpoint or the data
         from ``full_dehydrate`` for the related resource.
+
+        10to8 changes:
+            - We pass on the full_depth argument to our children - reduced by one.
         """
 
-        if getattr(bundle, 'full_depth', 0):
-            self.full_depth = int(bundle.full_depth)
-        else:
-            self.full_depth = 0
-
-        if not self.full:
+        if not ((getattr(bundle, 'full_depth', 0) > 0 and self.full_requestable) or self.full):
             # Be a good netizen.
             return related_resource.get_resource_uri(bundle)
         else:
@@ -59,7 +96,7 @@ class FullToManyField(fields.ToManyField):
             if self.full_requestable:
                 # Don't pass down 'full' if it's not allowed on this resource.
                 # decremet full_depth
-                new_bundle.full_depth = max(self.full_depth - 1, 0)
+                new_bundle.full_depth = max(getattr(bundle,'full_depth', 0) - 1, 0)
             return related_resource.full_dehydrate(new_bundle)
 
 class NestedToManyField(FullToManyField):
