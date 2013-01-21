@@ -11,21 +11,33 @@ from tastypie.resources import ResourceOptions, ModelDeclarativeMetaclass, \
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
 
-class NestedToManyField(fields.ToManyField):
+
+class FullToManyField(fields.ToManyField):
     """
-    Like tastypies's ToManyField but makes the resource_uri correct for nested resources.
+    Like tastypies's ToManyField but makes the resource_uri correct for nested resources, and we understand `full_depth`.
     """
 
+    def __init__(self, *args, **kwargs):
+        self.full_requestable = kwargs.pop('full_requstable', True)
+        super(FullToManyField, self).__init__(*args, **kwargs
+        )
+
     def dehydrate(self, bundle):
+
+        if self.full_requestable:
+            if getattr(bundle, 'full_depth', 0):
+                self.full_depth = int(bundle.full_depth)
+                self.full=True
+            else:
+                self.full_depth = 0
+
         if not bundle.obj or not bundle.obj.pk:
             if not self.null:
                 raise ApiFieldError(
                     "The model '%r' does not have a primary key and can not be used in a ToMany context." % bundle.obj)
 
             return []
-        self.parent_object = bundle.obj
-        return super(NestedToManyField, self).dehydrate(bundle)
-
+        return super(FullToManyField, self).dehydrate(bundle)
 
     def dehydrate_related(self, bundle, related_resource):
         """
@@ -33,17 +45,38 @@ class NestedToManyField(fields.ToManyField):
         from ``full_dehydrate`` for the related resource.
         """
 
-        related_resource.parent_resource = self._resource
-        related_resource.parent_object = self.parent_object
-        related_resource.nested_resource_name = self.attribute
+        if getattr(bundle, 'full_depth', 0):
+            self.full_depth = int(bundle.full_depth)
+        else:
+            self.full_depth = 0
 
         if not self.full:
             # Be a good netizen.
             return related_resource.get_resource_uri(bundle)
         else:
             # ZOMG extra data and big payloads.
-            bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
-            return related_resource.full_dehydrate(bundle)
+            new_bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+            if self.full_requestable:
+                # Don't pass down 'full' if it's not allowed on this resource.
+                # decremet full_depth
+                new_bundle.full_depth = max(self.full_depth - 1, 0)
+            return related_resource.full_dehydrate(new_bundle)
+
+class NestedToManyField(FullToManyField):
+    """
+    Like tastypies's ToManyField but makes the resource_uri correct for nested resources, and we understand `full_depth`.
+    """
+
+    def dehydrate(self, bundle):
+        self.parent_object = bundle.obj
+        return super(NestedToManyField, self).dehydrate(bundle)
+
+    def dehydrate_related(self, bundle, related_resource):
+        related_resource.parent_resource = self._resource
+        related_resource.parent_object = self.parent_object
+        related_resource.nested_resource_name = self.attribute
+
+        return super(NestedToManyField, self).dehydrate_related(bundle, related_resource)
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     """
@@ -495,8 +528,8 @@ class ExtendedModelResource(ModelResource):
 
         Performs authorization checks in every case.
         """
-        try:
 
+        try:
             if 'child_object' in kwargs:
                 try:
                     object_list = self.get_obj_from_parent_kwargs(**kwargs)
@@ -915,6 +948,9 @@ class ExtendedModelResource(ModelResource):
         """
         Same as the usual dispatch, but knows if its being called from a nested
         resource.
+
+        It also checks for the 'full_depth' option used on gets.
+
         """
         allowed_methods = getattr(self._meta,
                                   "%s_allowed_methods" % request_type, None)
@@ -927,6 +963,18 @@ class ExtendedModelResource(ModelResource):
 
         self.is_authenticated(request)
         self.throttle_check(request)
+
+        # Has the user requsted that relationships are returned in full?
+        request.full_depth = 0
+        if request_method == 'get':
+            if request.GET.get('full_depth', None):
+                try:
+                    depth = int(request.GET['full_depth'])
+                    if depth < 0 > 999:
+                        raise BadRequest("full_depth argument must be an interger >= 0.")
+                    request.full_depth = depth
+                except ValueError:
+                    raise BadRequest("full_depth argument must be an interger.")
 
         parent_resource = kwargs.get('parent_resource', None)
         if parent_resource is None:
@@ -1002,6 +1050,37 @@ class ExtendedModelResource(ModelResource):
             else:
                 raise NotFound
 
+
+    def get_list(self, request, **kwargs):
+        """
+        Returns a serialized list of resources.
+
+        Calls ``obj_get_list`` to provide the data, then handles that result
+        set and serializes it.
+
+        Should return a HttpResponse (200 OK).
+
+        10to8 change:
+            - We override here to inject our 'full_depth' attribute into bundles.
+        """
+        # TODO: Uncached for now. Invalidation that works for everyone may be
+        #       impossible.
+        objects = self.obj_get_list(request=request, **self.remove_api_resource_names(kwargs))
+        sorted_objects = self.apply_sorting(objects, options=request.GET)
+
+        paginator = self._meta.paginator_class(request.GET, sorted_objects, resource_uri=self.get_resource_uri(),
+            limit=self._meta.limit, max_limit=self._meta.max_limit, collection_name=self._meta.collection_name)
+        to_be_serialized = paginator.page()
+
+        # Dehydrate the bundles in preparation for serialization.
+        bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
+        #10to8 change:
+        map(lambda b: setattr(b,'full_depth',request.full_depth), bundles)
+        to_be_serialized['objects'] = [self.full_dehydrate(bundle) for bundle in bundles]
+        to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
+        return self.create_response(request, to_be_serialized)
+
+
     def get_detail(self, request, **kwargs):
         """
         Returns a single serialized resource.
@@ -1010,6 +1089,10 @@ class ExtendedModelResource(ModelResource):
         result set and serializes it.
 
         Should return a HttpResponse (200 OK).
+
+        10to8 change:
+            - We override here to inject our 'full_depth' attribute into bundles.
+
         """
         try:
             # If call was made through Nested we should already have the
@@ -1032,6 +1115,7 @@ class ExtendedModelResource(ModelResource):
                                             "at this URI.")
 
         bundle = self.build_bundle(obj=obj, request=request)
+        bundle.full_depth = request.full_depth
         bundle = self.full_dehydrate(bundle)
         bundle = self.alter_detail_data_to_serialize(request, bundle)
         return self.create_response(request, bundle)
