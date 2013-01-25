@@ -21,7 +21,7 @@ class FullToManyField(fields.ToManyField):
     """
 
     def __init__(self, *args, **kwargs):
-        self.full_requestable = kwargs.pop('full_requestable', True)
+        self.full_requestable = kwargs.pop('full_requstable', True)
 
         super(FullToManyField, self).__init__(*args, **kwargs)
 
