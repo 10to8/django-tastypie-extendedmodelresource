@@ -1,13 +1,16 @@
-from django.http import HttpResponse, Http404
+from django.http import HttpResponse
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
-from django.conf.urls.defaults import patterns, url, include
+from django.conf.urls.defaults import patterns, url
 from django.db.models import Q
 from tastypie import fields, http
 from tastypie.bundle import Bundle
 from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
-from tastypie.resources import ResourceOptions, ModelDeclarativeMetaclass, \
-    ModelResource, convert_post_to_put
+from tastypie.resources import (ResourceOptions,
+                                ModelDeclarativeMetaclass,
+                                ModelResource,
+                                convert_post_to_put)
+from tastypie.exceptions import ApiFieldError
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
 
@@ -18,10 +21,9 @@ class FullToManyField(fields.ToManyField):
     """
 
     def __init__(self, *args, **kwargs):
-        self.full_requestable = kwargs.pop('full_requstable', True)
+        self.full_requestable = kwargs.pop('full_requestable', True)
 
-        super(FullToManyField, self).__init__(*args, **kwargs
-        )
+        super(FullToManyField, self).__init__(*args, **kwargs)
 
     def dehydrate(self, bundle):
         """
@@ -67,10 +69,12 @@ class FullToManyField(fields.ToManyField):
 
         # TODO: Also model-specific and leaky. Relies on there being a
         #       ``Manager`` there.
+        full_depth = getattr(bundle, 'full_depth', 0)
+
         for m2m in the_m2ms.all():
             m2m_resource = self.get_related_resource(m2m)
             m2m_bundle = Bundle(obj=m2m, request=bundle.request)
-            m2m_bundle.full_depth = max(getattr(bundle,'full_depth', 0), 0)
+            m2m_bundle.full_depth = max(full_depth, 0)
 
             self.m2m_resources.append(m2m_resource)
             m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource))
@@ -86,8 +90,10 @@ class FullToManyField(fields.ToManyField):
         10to8 changes:
             - We pass on the full_depth argument to our children - reduced by one.
         """
+        full_depth = getattr(bundle, 'full_depth', 0)
 
-        if not ((getattr(bundle, 'full_depth', 0) > 0 and self.full_requestable) or self.full):
+        if (not (full_depth > 0 and self.full_requestable) and
+            not self.full):
             # Be a good netizen.
             return related_resource.get_resource_uri(bundle)
         else:
@@ -96,7 +102,7 @@ class FullToManyField(fields.ToManyField):
             if self.full_requestable:
                 # Don't pass down 'full' if it's not allowed on this resource.
                 # decremet full_depth
-                new_bundle.full_depth = max(getattr(bundle,'full_depth', 0) - 1, 0)
+                new_bundle.full_depth = max(full_depth - 1, 0)
             return related_resource.full_dehydrate(new_bundle)
 
 class NestedToManyField(FullToManyField):
@@ -140,13 +146,13 @@ class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
                                 }
                             },
 
-    TODO: Fix this comment. It doesn't match the code. Where is 
+    TODO: Fix this comment. It doesn't match the code. Where is
     AnyIdAttributeResourceOptions??
     """
 
-    def __new__(cls, name, bases, attrs):
-        new_class = super(ExtendedDeclarativeMetaclass, cls).__new__(cls,
-                            name, bases, attrs)
+    def __new__(mcs, name, bases, attrs):
+        new_class = super(ExtendedDeclarativeMetaclass, mcs).__new__(mcs, name,
+                                                                     bases, attrs)
 
         opts = getattr(new_class, 'Meta', None)
         new_class._meta = ResourceOptions(opts)
@@ -206,9 +212,15 @@ class ExtendedModelResource(ModelResource):
         """
         kwargs_subset = url_dict.copy()
 
-        exclude_keys = ['generic_fields','api_name', 'resource_name', 'related_manager',
-         'child_object', 'parent_resource', 'nested_name', 'nested_field_name',
-         'parent_object']
+        exclude_keys = ['generic_fields',
+                        'api_name',
+                        'resource_name',
+                        'related_manager',
+                        'child_object',
+                        'parent_resource',
+                        'nested_name',
+                        'nested_field_name',
+                        'parent_object']
 
         #related_keys_search = []
 
@@ -249,6 +261,7 @@ class ExtendedModelResource(ModelResource):
                 else:
                     kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
             except AttributeError:
+                # JMRA: what is ServerError? where is it defined?
                 raise ImmediateHttpResponse(ServerError("Missing 'nesteed_detail_uri_name' on resource %s meta" % (self.__name__)))
         if hasattr(self, 'parent_object') and hasattr(self, 'parent_resource'):
             kwargs[self.parent_resource._meta.detail_uri_name] = getattr(self.parent_object, self.parent_resource._meta.detail_uri_name)
@@ -298,7 +311,7 @@ class ExtendedModelResource(ModelResource):
             url = self._build_reverse_url(url_name, kwargs=kwargs)
             return url
         except NoReverseMatch:
-           return ''
+            return ''
 
     def base_urls(self):
         """
@@ -648,9 +661,9 @@ class ExtendedModelResource(ModelResource):
 
             manager = kwargs.pop('related_manager', None)
             parent_object = kwargs.pop('parent_object', None)
-            parent_resource = kwargs.pop('parent_resource', None)
-            field_name = kwargs.pop('nested_field_name', None)
-            nested_name = kwargs.pop('nested_name', None)
+            #parent_resource = kwargs.pop('parent_resource', None)
+            #field_name = kwargs.pop('nested_field_name', None)
+            #nested_name = kwargs.pop('nested_name', None)
 
             fields = manager.core_filters.keys()
 
@@ -665,7 +678,7 @@ class ExtendedModelResource(ModelResource):
                 child_object_attribute = fields[0].split('__')[0]
 
             if manager is None or child_object_attribute is None or parent_object is None:
-                 raise BadRequest("Couldn't identify relationship")
+                raise BadRequest("Couldn't identify relationship")
 
             if bundle.obj is None:
                 raise BadRequest("Coludn't create a base object.")
@@ -686,8 +699,8 @@ class ExtendedModelResource(ModelResource):
                     continue
                 for key2 in kwargs.keys():
                     if key2.startswith(key + '__'):
-                       kwargs.pop(key2)
-                       continue
+                        kwargs.pop(key2)
+                        continue
 
             for key, value in kwargs.items():
                 setattr(bundle.obj, key, value)
@@ -717,8 +730,8 @@ class ExtendedModelResource(ModelResource):
     def get_obj_from_parent_kwargs(self, **kwargs):
 
         # RDH: Note: this should be called after (from) dispatch_nested, since
-        # that method creates the pk (from nested_pk) and parent_pk fields, and 
-        # removes nested_pk. For the time being, to make sure we're being called 
+        # that method creates the pk (from nested_pk) and parent_pk fields, and
+        # removes nested_pk. For the time being, to make sure we're being called
         # correctly:
         if 'nested_pk' in kwargs:
             raise ValueError("We were called with nested_pk, instead of pk and parent_pk")
@@ -962,7 +975,7 @@ class ExtendedModelResource(ModelResource):
         )
 
     def is_authorized_nested(self, request, nested_name,
-                               parent_resource, parent_object, object=None):
+                             parent_resource, parent_object, object=None):
         """
         Handles checking of permissions to see if the user has authorization
         to GET, POST, PUT, or DELETE this resource.  If ``object`` is provided,
@@ -1112,7 +1125,8 @@ class ExtendedModelResource(ModelResource):
         # Dehydrate the bundles in preparation for serialization.
         bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
         #10to8 change:
-        map(lambda b: setattr(b,'full_depth',request.full_depth), bundles)
+        set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
+        map(set_full_depth, bundles)
         to_be_serialized['objects'] = [self.full_dehydrate(bundle) for bundle in bundles]
         to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
         return self.create_response(request, to_be_serialized)
@@ -1180,4 +1194,3 @@ class ExtendedModelResource(ModelResource):
             raise NotImplementedError('You cannot patch a list on a nested'
                                       ' resource.')
         return super(ExtendedModelResource, self).patch_list(request, **kwargs)
-
