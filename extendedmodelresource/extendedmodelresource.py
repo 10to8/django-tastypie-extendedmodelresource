@@ -14,6 +14,70 @@ from tastypie.exceptions import ApiFieldError
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
 
+class FullToOneField(fields.ToOneField):
+    def __init__(self, *args, **kwargs):
+        self.full_requestable = kwargs.pop('full_requestable', True)
+
+        super(FullToOneField, self).__init__(*args, **kwargs)
+
+
+    def dehydrate(self, bundle):
+        """
+        10to8 changes: We pass on the full_depth value to the fk_bundle.
+        """
+        foreign_obj = None
+
+        if isinstance(self.attribute, basestring):
+            attrs = self.attribute.split('__')
+            foreign_obj = bundle.obj
+
+            for attr in attrs:
+                previous_obj = foreign_obj
+                try:
+                    foreign_obj = getattr(foreign_obj, attr, None)
+                except ObjectDoesNotExist:
+                    foreign_obj = None
+        elif callable(self.attribute):
+            foreign_obj = self.attribute(bundle)
+
+        if not foreign_obj:
+            if not self.null:
+                raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
+
+            return None
+
+        full_depth = getattr(bundle, 'full_depth', 0)
+        self.fk_resource = self.get_related_resource(foreign_obj)
+        fk_bundle = Bundle(obj=foreign_obj, request=bundle.request)
+        fk_bundle.full_depth = full_depth
+
+        return self.dehydrate_related(fk_bundle, self.fk_resource)
+
+    def dehydrate_related(self, bundle, related_resource):
+        """
+        10to8 changes: We pass on the full_depth argument to our child - reduced by one.
+        """
+        """
+        Based on the ``full_resource``, returns either the endpoint or the data
+        from ``full_dehydrate`` for the related resource.
+        """
+        full_depth = getattr(bundle, 'full_depth', 0)
+
+        if (not (full_depth > 0 and self.full_requestable) and
+            not self.full):
+
+            return related_resource.get_resource_uri(bundle)
+        else:
+            # ZOMG extra data and big payloads.
+            new_bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+            if self.full_requestable:
+                # Don't pass down 'full' if it's not allowed on this resource.
+                # decremet full_depth
+                new_bundle.full_depth = max(full_depth - 1, 0)
+            else:
+                new_bundle.full_depth = 0
+            return related_resource.full_dehydrate(new_bundle)
+
 
 class FullToManyField(fields.ToManyField):
     """
@@ -21,7 +85,7 @@ class FullToManyField(fields.ToManyField):
     """
 
     def __init__(self, *args, **kwargs):
-        self.full_requestable = kwargs.pop('full_requstable', True)
+        self.full_requestable = kwargs.pop('full_requestable', True)
 
         super(FullToManyField, self).__init__(*args, **kwargs)
 
@@ -80,17 +144,6 @@ class FullToManyField(fields.ToManyField):
             m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource))
 
         return m2m_dehydrated
-    
-    
-    def return_uri (self, full_depth):
-        """
-        Decides if it's better to return the URI instead of the full object.
-        """
-        return ((not self.full and not full_depth) or 
-                (not self.full and not self.full_requestable))
-                
-
-
 
     def dehydrate_related(self, bundle, related_resource):
         """
@@ -102,10 +155,9 @@ class FullToManyField(fields.ToManyField):
         """
         full_depth = getattr(bundle, 'full_depth', 0)
 
-        return_uri = self.return_uri(full_depth)
-
-        if return_uri:
-            # Be a good netizen.            
+        if (not (full_depth > 0 and self.full_requestable) and
+            not self.full):
+            # Be a good netizen.
             return related_resource.get_resource_uri(bundle)
         else:
             # ZOMG extra data and big payloads.
@@ -121,6 +173,11 @@ class NestedToManyField(FullToManyField):
     Like tastypies's ToManyField but makes the resource_uri correct for nested resources, and we understand `full_depth`.
     """
 
+    def __init__(self, *args, **kwargs):
+        self.nested_resource_name = kwargs.pop('nested_resource_name', None)
+
+        super(NestedToManyField, self).__init__(*args, **kwargs)
+
     def dehydrate(self, bundle):
         self.parent_object = bundle.obj
         return super(NestedToManyField, self).dehydrate(bundle)
@@ -128,9 +185,13 @@ class NestedToManyField(FullToManyField):
     def dehydrate_related(self, bundle, related_resource):
         related_resource.parent_resource = self._resource
         related_resource.parent_object = self.parent_object
-        related_resource.nested_resource_name = self.attribute
-
+        # related_resource.nested_resource_name = self.attribute # <--- This is very wrong.
+        # Attributes are not the same as the name of the nested resource in the URL.
+        related_resource.nested_resource_name = getattr(self,'nested_resource_name', None)
+        if related_resource.nested_resource_name is None:
+            related_resource.nested_resource_name = self.attribute
         return super(NestedToManyField, self).dehydrate_related(bundle, related_resource)
+
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     """
@@ -272,8 +333,7 @@ class ExtendedModelResource(ModelResource):
                 else:
                     kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
             except AttributeError:
-                # JMRA: what is ServerError? where is it defined?
-                raise ImmediateHttpResponse(ServerError("Missing 'nesteed_detail_uri_name' on resource %s meta" % (self.__name__)))
+                raise ImmediateHttpResponse("Missing 'nesteed_detail_uri_name' on resource %s meta" % (self.__name__))
         if hasattr(self, 'parent_object') and hasattr(self, 'parent_resource'):
             kwargs[self.parent_resource._meta.detail_uri_name] = getattr(self.parent_object, self.parent_resource._meta.detail_uri_name)
 
@@ -308,14 +368,6 @@ class ExtendedModelResource(ModelResource):
 
 
     def get_resource_uri(self, bundle_or_obj=None, url_name='api_dispatch_list'):
-
-        # The object could be an intermediary one,
-        # like CustomerEvent, instead of the the final
-        # one we are interested in Customer.
-        # We need to discover if we need to cross a
-        # relationship for getting the final object.
-        
-
         if hasattr(self, 'parent_resource'):
             if bundle_or_obj is not None:
                 url_name = 'api_dispatch_nested_detail'
@@ -324,14 +376,13 @@ class ExtendedModelResource(ModelResource):
         else:
             if bundle_or_obj is not None:
                 url_name = 'api_dispatch_detail'
-                
         try:
             kwargs = self.resource_uri_kwargs(bundle_or_obj)
             url = self._build_reverse_url(url_name, kwargs=kwargs)
             return url
         except NoReverseMatch:
-            # XXX JMRA we should be raising again...
-            return ''
+            print 'Reverse url fail while building resource uri. args were: %s' % kwargs
+            return u''
 
     def base_urls(self):
         """
@@ -363,43 +414,6 @@ class ExtendedModelResource(ModelResource):
                      self.wrap_view('dispatch_detail'),
                      name="api_dispatch_detail"),
         ]
-        
-
-    def get_nested_url_detail(self, nested_name, field=None):
-
-        if field is not None:
-            nested_uri_name_regex = field.to_class().get_nested_uri_name_regex()
-        else:
-            nested_uri_name_regex = self.get_nested_uri_name_regex()
-
-
-        params = [self._meta.resource_name,
-                  self._meta.detail_uri_name,
-                  self.get_detail_uri_name_regex(),
-                  nested_name,                    
-                  nested_uri_name_regex,
-                  trailing_slash()]
-
-        path = r"^(?P<resource_name>{0})/(?P<{1}>{2})/(?P<nested_name>{3})/(?P<nested_pk>{4}){5}$"
-
-        return url(path.format(*params),
-                   self.wrap_view('dispatch_nested_detail'),
-                   name='api_dispatch_nested_detail')  
-        
-
-    def get_nested_url_list(self, nested_name):            
-        params = [self._meta.resource_name,
-                  self._meta.detail_uri_name,
-                  self.get_detail_uri_name_regex(),
-                  nested_name,
-                  trailing_slash()]      
-              
-        path = r"^(?P<resource_name>{0})/(?P<{1}>{2})/(?P<nested_name>{3}){4}$"
-        
-        return url(path.format(*params),                      
-                   self.wrap_view('dispatch_nested'),
-                   name='api_dispatch_nested_list')
-    
 
     def nested_urls(self):
         """
@@ -407,15 +421,38 @@ class ExtendedModelResource(ModelResource):
 
         Each resource listed as Nested will generate one url.
         """
-        
-        urls = []
+        def get_nested_url_detail(nested_name, field=None):
 
-        for nested_name in self._nested.keys():
-            urls.append(self.get_nested_url_list(nested_name)) 
-        
-        for nested_name, value in self._nested.items():
-            urls.append(self.get_nested_url_detail(nested_name, value))
-            
+            if field is not None:
+                nested_uri_name_regex = field.to_class().get_nested_uri_name_regex()
+            else:
+                nested_uri_name_regex = self.get_nested_uri_name_regex()
+
+            return url(r"^(?P<resource_name>%s)/(?P<%s>%s)/"
+                        r"(?P<nested_name>%s)/(?P<%s>%s)%s$" %
+                       (self._meta.resource_name,
+                        self._meta.detail_uri_name,
+                        self.get_detail_uri_name_regex(),
+                        nested_name,
+                        'nested_pk',
+                        nested_uri_name_regex,
+                        trailing_slash()),
+                       self.wrap_view('dispatch_nested_detail'),
+                       name='api_dispatch_nested_detail')
+
+        def get_nested_url_list(nested_name):
+            return url(r"^(?P<resource_name>%s)/(?P<%s>%s)/"
+                        r"(?P<nested_name>%s)%s$" %
+                       (self._meta.resource_name,
+                        self._meta.detail_uri_name,
+                        self.get_detail_uri_name_regex(),
+                        nested_name,
+                        trailing_slash()),
+                       self.wrap_view('dispatch_nested'),
+                       name='api_dispatch_nested_list')
+
+        urls = [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
+        [urls.append(get_nested_url_detail(nested_name, self._nested[nested_name])) for nested_name in self._nested.keys()]
         return urls
 
 
