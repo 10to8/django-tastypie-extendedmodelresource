@@ -11,8 +11,21 @@ from tastypie.resources import (ResourceOptions,
                                 ModelResource,
                                 convert_post_to_put)
 from tastypie.exceptions import ApiFieldError
+import tastypie.fields
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
+
+import dateutil.parser
+import pytz
+
+def convert_aware_datetime_to_naive(dt):
+    """
+    Convert to UTC, then remove the timezone.
+    """
+    if dt.tzinfo:
+        dt = dt.astimezone(pytz.UTC)
+        return dt.replace(tzinfo=None)
+    return dt
 
 class FullToOneField(fields.ToOneField):
     def __init__(self, *args, **kwargs):
@@ -600,6 +613,42 @@ class ExtendedModelResource(ModelResource):
 
         return object_list.filter(q)
 
+    def filter_value_to_python(self, value, field_name, filters, filter_expr,
+            filter_type):
+        """
+        Turn the string ``value`` into a python object.
+
+        10to8 changes: We look for datetime queries and strip timezone.
+        """
+        # Simple values
+        if value in ['true', 'True', True]:
+            value = True
+        elif value in ['false', 'False', False]:
+            value = False
+        elif value in ('nil', 'none', 'None', None):
+            value = None
+
+        # Split on ',' if not empty string and either an in or range filter.
+        if filter_type in ('in', 'range') and len(value):
+            if hasattr(filters, 'getlist'):
+                value = []
+
+                for part in filters.getlist(filter_expr):
+                    value.extend(part.split(','))
+            else:
+                value = value.split(',')
+
+        if isinstance(self.fields[field_name], tastypie.fields.DateTimeField):
+            try:
+                # Try to rip a date/datetime out of it.
+                value = dateutil.parser.parse(value)
+                value = convert_aware_datetime_to_naive(value).isoformat()
+            except ValueError:
+                raise BadRequest("Datetime provided to '%s' field doesn't appear to be a valid datetime string: '%s'" % (self.instance_name, value))
+
+
+        return value
+
     def obj_get_list(self, request=None, **kwargs):
         """
         A ORM-specific implementation of ``obj_get_list``.
@@ -822,7 +871,6 @@ class ExtendedModelResource(ModelResource):
                 raise NotFound("Child object could not be found.")
 
             return obj
-
 
     def obj_update(self, bundle, request=None, skip_errors=False, **kwargs):
         """
