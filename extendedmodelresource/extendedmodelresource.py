@@ -208,11 +208,6 @@ class NestedToManyField(FullToManyField):
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     """
-    Same as ``DeclarativeMetaclass`` but uses ``AnyIdAttributeResourceOptions``
-    instead of ``ResourceOptions`` and adds support for multiple nested fields
-    defined in a "Nested" class (the same way as "Meta") inside the resources.
-
-    Also generic relationship support.
     WARNING, WARNING, you MUST create ``nested_generic_fields`` in the parents Meta if you use generic relationships.
     Also if you don't use the default values for the three generic fields, you MUST set them.
 
@@ -655,6 +650,8 @@ class ExtendedModelResource(ModelResource):
 
         Takes an optional ``request`` object, whose ``GET`` dictionary can be
         used to narrow the query.
+
+        if called nested, it uses he nested_manager
         """
         filters = {}
         search = False
@@ -671,7 +668,7 @@ class ExtendedModelResource(ModelResource):
         # Update with the provided kwargs.
         filters.update(cleaned_kwargs)
         applicable_filters = self.build_filters(filters=filters)
-
+        print applicable_filters
         generic_fields = kwargs.get('generic_fields')
 
         if generic_fields:
@@ -682,7 +679,10 @@ class ExtendedModelResource(ModelResource):
                         applicable_filters[kwarg] = cleaned_kwargs[kwarg]
 
         try:
-            base_object_list = self.apply_filters(request, applicable_filters)
+            if 'related_manager' in kwargs:
+                base_object_list = kwargs['related_manager'].all()
+            else:
+                base_object_list = self.apply_filters(request, applicable_filters)
             if search:
                 base_object_list = self.obj_search(query, base_object_list, **kwargs)
             return self.apply_proper_authorization_limits(request,
@@ -706,11 +706,11 @@ class ExtendedModelResource(ModelResource):
                     kwargs = self.real_remove_api_resource_names(kwargs)
                 except AttributeError:
                     raise NotFound('Could not find child object for this resource')
-
-            base_object_list = self.get_object_list(request).filter(
+            else:
+                base_object_list = self.get_object_list(request).filter(
                                 **self.real_remove_api_resource_names(kwargs))
 
-            object_list = self.apply_proper_authorization_limits(request,
+                object_list = self.apply_proper_authorization_limits(request,
                                                 base_object_list, **kwargs)
 
             stringified_kwargs = ', '.join(["%s=%s" % (k, v)
@@ -1084,7 +1084,7 @@ class ExtendedModelResource(ModelResource):
             if 'pk' in kwargs:
                 del kwargs['pk']
             # Update with the related manager's filters, which will link to
-            # the parent.
+            # the parent. Key field for filtering.
             kwargs.update(manager.core_filters)
 
         return nested_resource.dispatch(
@@ -1159,6 +1159,7 @@ class ExtendedModelResource(ModelResource):
 
         # All clear. Process the request.
         request = convert_post_to_put(request)
+
         response = method(request, **kwargs)
 
         # Add the throttled request.
