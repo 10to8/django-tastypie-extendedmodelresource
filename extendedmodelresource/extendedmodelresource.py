@@ -606,7 +606,7 @@ class ExtendedModelResource(ModelResource):
         for item in self._meta.searching:
             q = (q | Q(**{item: query}))
 
-        return object_list.filter(q)
+        return object_list.filter(q).distinct()
 
     def filter_value_to_python(self, value, field_name, filters, filter_expr,
             filter_type):
