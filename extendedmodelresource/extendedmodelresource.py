@@ -17,6 +17,15 @@ from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 
 import dateutil.parser
 import pytz
+import re
+
+def nested_detail_uri_matcher(uri):
+    expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
+    result = re.match(expression, uri)
+    if result is None:
+        return None
+    return result.groupdict()
+
 
 def convert_aware_datetime_to_naive(dt):
     """
@@ -99,7 +108,7 @@ class FullToManyField(fields.ToManyField):
 
     def __init__(self, *args, **kwargs):
         self.full_requestable = kwargs.pop('full_requestable', True)
-
+        self.delete_on_unlink = kwargs.pop('delete_on_unlink', False)
         super(FullToManyField, self).__init__(*args, **kwargs)
 
     def dehydrate(self, bundle):
@@ -188,7 +197,6 @@ class NestedToManyField(FullToManyField):
 
     def __init__(self, *args, **kwargs):
         self.nested_resource_name = kwargs.pop('nested_resource_name', None)
-
         super(NestedToManyField, self).__init__(*args, **kwargs)
 
     def dehydrate(self, bundle):
@@ -279,6 +287,31 @@ class ExtendedModelResource(ModelResource):
         override this function and provide your own.
         """
         return r'\d*'
+
+    def lookup_kwargs_with_identifiers(self, bundle, kwargs):
+        """
+        Kwargs here represent uri identifiers Ex: /repos/<user_id>/<repo_name>/
+        We need to turn those identifiers into Python objects for generating
+        lookup parameters that can find them in the DB
+
+        Simplify, we only support lookups using the detail_uri_name, which defaults to `pk`
+        """
+        detail_uri = kwargs.get(self._meta.detail_uri_name, None)
+
+        if detail_uri is not None:
+            return {self._meta.detail_uri_name: detail_uri}
+        else:
+            lookup_kwargs = {}
+
+        for identifier in kwargs:
+            if identifier == 'resource_uri':
+                result = nested_detail_uri_matcher(kwargs[identifier])
+
+                if result is not None:
+                    if not result['resource_name'] == self._meta.resource_name: # make sure we're not the parent.
+                        lookup_kwargs[self._meta.detail_uri_name] = result['child_pk']
+
+        return lookup_kwargs
 
     def real_remove_api_resource_names(self, url_dict):
         """
@@ -668,7 +701,6 @@ class ExtendedModelResource(ModelResource):
         # Update with the provided kwargs.
         filters.update(cleaned_kwargs)
         applicable_filters = self.build_filters(filters=filters)
-        print applicable_filters
         generic_fields = kwargs.get('generic_fields')
 
         if generic_fields:
@@ -846,6 +878,95 @@ class ExtendedModelResource(ModelResource):
             return super(ExtendedModelResource, self).obj_create(bundle, request,
                                                              **kwargs)
 
+    def hydrate_m2m(self, bundle):
+        """
+        Extended here to make sure we don't wipe m2m attributes of models if they are not included in the origional data.
+        For example, if a user updates a object, which has several related objects under a ToManyField. We will only clear
+        the related objects that field if the user includes field_name = [] in the PUT data.
+        Or, another way of putting it, we won't touch fields of at object that are not specifically set and included in the
+        PUT data.
+        """
+
+        old_data = bundle.data.copy()
+
+        m2m_bundle = super(ExtendedModelResource, self).hydrate_m2m(bundle)
+
+        # Drop fields that havn't got blank=True set. Otherwise we'll wipe them.
+        for field_name, field_obj in m2m_bundle.data.items():
+            if field_name not in old_data.keys() and self.fields[field_name].blank == False:
+                del m2m_bundle.data[field_name]
+        del old_data
+        return m2m_bundle
+
+
+
+    def save_m2m(self, bundle):
+        """
+        Handles the saving of related M2M data.
+
+        Due to the way Django works, the M2M data must be handled after the
+        main instance, which is why this isn't a part of the main ``save`` bits.
+
+        We override here to support related fields properly.
+        We don't clear the manager automatically, and we offer the choice of deleting objects that are unlinked.
+
+        """
+        for field_name, field_object in self.fields.items():
+            if not getattr(field_object, 'is_m2m', False):
+                continue
+
+            if not field_object.attribute:
+                continue
+
+            if field_object.readonly:
+                continue
+            # Get the manager.
+            related_mngr = None
+
+            if isinstance(field_object.attribute, basestring):
+                related_mngr = getattr(bundle.obj, field_object.attribute)
+            elif callable(field_object.attribute):
+                related_mngr = field_object.attribute(bundle)
+
+            if not related_mngr:
+                continue
+
+            if field_name not in bundle.data:
+                continue
+
+            new = []
+            existing = []
+
+            existing_objects = {}
+            for obj in related_mngr.all():
+                existing_objects[obj.id] = False
+
+            related_objs = []
+
+            for related_bundle in bundle.data[field_name]:
+                if related_bundle.obj.id is None:
+                    new.append(related_bundle)
+                    continue
+                if related_bundle.obj.id in existing_objects.keys():
+                    existing_objects[related_bundle.obj.id] = True
+                    existing.append(related_bundle)
+                    continue
+                # We have an id, but we're not existing... odd.
+                new.append(related_bundle)
+
+            to_delete = filter(lambda o: existing_objects[o] == False, existing_objects.keys())
+            if len(to_delete)  > 0:
+                delete_on_unlink = getattr(field_object, "delete_on_unlink", False)
+                if delete_on_unlink == True:
+                    related_mngr.filter(id__in=to_delete).delete()
+                else:
+                    related_mngr.remove(related_mngr.filter(id__in=to_delete))
+
+            for related_bundle in new + existing:
+                related_bundle.obj.save()
+
+            related_mngr.add(*[n.obj for n in new])
+
 
     def get_obj_from_parent_kwargs(self, **kwargs):
 
@@ -878,6 +999,7 @@ class ExtendedModelResource(ModelResource):
         If not return 404
         """
         # Are we nested?
+
         if 'child_object' in kwargs:
             try:
                 bundle.obj = self.get_obj_from_parent_kwargs(**kwargs)
