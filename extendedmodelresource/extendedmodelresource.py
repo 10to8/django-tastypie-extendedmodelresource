@@ -922,9 +922,9 @@ class ExtendedModelResource(ModelResource):
                 continue
             # Get the manager.
             related_mngr = None
-
             if isinstance(field_object.attribute, basestring):
                 related_mngr = getattr(bundle.obj, field_object.attribute)
+
             elif callable(field_object.attribute):
                 related_mngr = field_object.attribute(bundle)
 
@@ -962,7 +962,7 @@ class ExtendedModelResource(ModelResource):
                 else:
                     related_mngr.remove(related_mngr.filter(id__in=to_delete))
 
-            for related_bundle in new + existing:
+            for related_bundle in existing:
                 related_bundle.obj.save()
 
             related_mngr.add(*[n.obj for n in new])
@@ -1290,8 +1290,10 @@ class ExtendedModelResource(ModelResource):
         # If what comes back isn't a ``HttpResponse``, assume that the
         # request was accepted and that some action occurred. This also
         # prevents Django from freaking out.
+
         if not isinstance(response, HttpResponse):
             return http.HttpNoContent()
+
 
         return response
 
