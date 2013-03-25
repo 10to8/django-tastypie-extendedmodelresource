@@ -1,4 +1,4 @@
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
 from django.conf.urls.defaults import patterns, url
@@ -10,11 +10,12 @@ from tastypie.resources import (ResourceOptions,
                                 ModelDeclarativeMetaclass,
                                 ModelResource,
                                 convert_post_to_put)
+from tastypie.utils.mime import determine_format, build_content_type
 from tastypie.exceptions import ApiFieldError
 import tastypie.fields
 from tastypie.utils import trailing_slash, dict_strip_unicode_keys
-
-
+from django.conf import settings
+import logging
 import dateutil.parser
 import pytz
 import re
@@ -283,6 +284,59 @@ class ExtendedModelResource(ModelResource):
 
     __metaclass__ = ExtendedDeclarativeMetaclass
 
+
+    def _handle_500(self, request, exception):
+        """
+
+        :param request:
+        :param exception:
+        :return:
+        """
+        import traceback
+        import sys
+        the_trace = '\n'.join(traceback.format_exception(*(sys.exc_info())))
+        response_class = http.HttpResponse
+        response_code = 500
+
+        NOT_FOUND_EXCEPTIONS = (NotFound, ObjectDoesNotExist, Http404)
+
+        if isinstance(exception, NOT_FOUND_EXCEPTIONS):
+            response_class = HttpResponseNotFound
+            response_code = 404
+
+        if settings.DEBUG or getattr(settings, 'TASTYPIE_FULL_DEBUG', False):
+            data = {
+                "error_message": unicode(exception),
+                "traceback": the_trace,
+            }
+            desired_format = self.determine_format(request)
+            serialized = self.serialize(request, data, desired_format)
+            return response_class(content=serialized, content_type=build_content_type(desired_format))
+
+        if not response_code == 404:
+            log = logging.getLogger('django.request.tastypie')
+            log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': response_code, 'request':request})
+
+        # check our exception class for help dealing with its errors..
+        response_code = getattr(exception, "_api_error_code", response_code)
+        raise_message = getattr(exception, "_api_raise_message", False)
+        std_error_code = getattr(exception, "_api_std_error_code", "")
+        default_error = getattr(exception, "_api_default_error", "There was a problem, please try again.")
+
+        if raise_message:
+            error = {'error': std_error_code, 'description': exception.message}
+        else:
+            error = {'error': std_error_code, 'description': default_error}
+
+        data = {
+            'error': 1,
+            'errors': [error],
+        }
+
+        desired_format = self.determine_format(request)
+        serialized = self.serialize(request, data, desired_format)
+        return response_class(content=serialized, content_type=build_content_type(desired_format), status=response_code)
+
     def remove_api_resource_names(self, url_dict):
         """
         Override this function, we are going to use some data for Nesteds.
@@ -457,12 +511,6 @@ class ExtendedModelResource(ModelResource):
                 url_name = 'api_dispatch_detail'
         try:
             kwargs = self.resource_uri_kwargs(bundle_or_obj, url_name=url_name)
-            try:
-                print "url: %s" % (bundle_or_obj.request.path)
-            except:
-                pass
-            print "kwargs: %s" % kwargs
-            print "url name: %s" % url_name
             url = self._build_reverse_url(url_name, kwargs=kwargs)
             return url
         except NoReverseMatch:
@@ -538,9 +586,6 @@ class ExtendedModelResource(ModelResource):
 
         urls = [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
         [urls.append(get_nested_url_detail(nested_name, self._nested[nested_name])) for nested_name in self._nested.keys()]
-        if self._meta.resource_name == 'staff':
-            print "Nested URLS for resource: %s are: " % self._meta.resource_name
-            print urls
         return urls
 
 
