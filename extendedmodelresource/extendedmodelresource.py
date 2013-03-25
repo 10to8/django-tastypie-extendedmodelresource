@@ -84,7 +84,6 @@ class FullToOneField(fields.ToOneField):
         from ``full_dehydrate`` for the related resource.
         """
         full_depth = getattr(bundle, 'full_depth', 0)
-
         if (not (full_depth > 0 and self.full_requestable) and
             not self.full):
 
@@ -92,6 +91,7 @@ class FullToOneField(fields.ToOneField):
         else:
             # ZOMG extra data and big payloads.
             new_bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+
             if self.full_requestable:
                 # Don't pass down 'full' if it's not allowed on this resource.
                 # decremet full_depth
@@ -111,7 +111,7 @@ class FullToManyField(fields.ToManyField):
         self.delete_on_unlink = kwargs.pop('delete_on_unlink', False)
         super(FullToManyField, self).__init__(*args, **kwargs)
 
-    def dehydrate(self, bundle):
+    def dehydrate(self, bundle, nested_uri=False):
         """
         10to8 changes:
             We pass on the full_depth to the m2m bundle.
@@ -161,13 +161,18 @@ class FullToManyField(fields.ToManyField):
             m2m_resource = self.get_related_resource(m2m)
             m2m_bundle = Bundle(obj=m2m, request=bundle.request)
             m2m_bundle.full_depth = max(full_depth, 0)
-
+            # Nested URI additions
+            if nested_uri:
+                m2m_bundle.parent_object = bundle.obj
+                m2m_bundle.parent_resource = self._resource
+                m2m_bundle.nested_name = self.instance_name # For building nested URI
+            # end nested URI additions
             self.m2m_resources.append(m2m_resource)
             m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource))
 
         return m2m_dehydrated
 
-    def dehydrate_related(self, bundle, related_resource):
+    def dehydrate_related(self, bundle, related_resource, nested_uri=False):
         """
         Based on the ``full_resource``, returns either the endpoint or the data
         from ``full_dehydrate`` for the related resource.
@@ -183,7 +188,14 @@ class FullToManyField(fields.ToManyField):
             return related_resource.get_resource_uri(bundle)
         else:
             # ZOMG extra data and big payloads.
+            #Why build a new bundle here?
+
             new_bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+            if nested_uri:
+                new_bundle.parent_object=getattr(bundle, 'parent_object', None)
+                new_bundle.nested_name = self.instance_name
+                new_bundle.parent_resource = self._resource
+
             if self.full_requestable:
                 # Don't pass down 'full' if it's not allowed on this resource.
                 # decremet full_depth
@@ -200,19 +212,22 @@ class NestedToManyField(FullToManyField):
         super(NestedToManyField, self).__init__(*args, **kwargs)
 
     def dehydrate(self, bundle):
-        self.parent_object = bundle.obj
-        return super(NestedToManyField, self).dehydrate(bundle)
+        """
+        10to8 changes:
+            We pass on the full_depth to the m2m bundle.
+        """
+
+        return super(NestedToManyField, self).dehydrate(bundle, nested_uri=True)
 
     def dehydrate_related(self, bundle, related_resource):
-        related_resource.parent_resource = self._resource
-        related_resource.parent_object = self.parent_object
-        # related_resource.nested_resource_name = self.attribute # <--- This is very wrong.
-        # Attributes are not the same as the name of the nested resource in the URL.
-        related_resource.nested_resource_name = getattr(self,'nested_resource_name', None)
-        if related_resource.nested_resource_name is None:
-            related_resource.nested_resource_name = self.attribute
-        return super(NestedToManyField, self).dehydrate_related(bundle, related_resource)
+        """
+        Based on the ``full_resource``, returns either the endpoint or the data
+        from ``full_dehydrate`` for the related resource.
 
+        10to8 changes:
+            - We pass on the full_depth argument to our children - reduced by one.
+        """
+        return super(NestedToManyField, self).dehydrate_related(bundle, related_resource, nested_uri=True)
 
 class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
     """
@@ -370,18 +385,38 @@ class ExtendedModelResource(ModelResource):
         if bundle_or_obj is not None:
             try:
                 if isinstance(bundle_or_obj, Bundle):
-                    kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj.obj, 'pk')
+                    if getattr(bundle_or_obj, 'obj', None) is not None:
+                        kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj.obj, 'pk')
                 else:
                     kwargs[self._meta.nested_detail_uri_name] = getattr(bundle_or_obj, 'pk')
             except AttributeError:
-                raise ImmediateHttpResponse("Missing 'nesteed_detail_uri_name' on resource %s meta" % (self.__name__))
-        if hasattr(self, 'parent_object') and hasattr(self, 'parent_resource'):
-            kwargs[self.parent_resource._meta.detail_uri_name] = getattr(self.parent_object, self.parent_resource._meta.detail_uri_name)
+                raise ImmediateHttpResponse("Missing 'nested_detail_uri_name' on resource %s meta" % (self._meta.resource_name))
+
+            if hasattr(bundle_or_obj, 'parent_object') and hasattr(bundle_or_obj, 'parent_resource'):
+                kwargs[bundle_or_obj.parent_resource._meta.detail_uri_name] = getattr(bundle_or_obj.parent_object, bundle_or_obj.parent_resource._meta.detail_uri_name)
+
+            if getattr(bundle_or_obj, 'nested_name', None) is not None:
+                kwargs['nested_name'] = getattr(bundle_or_obj, 'nested_name', None)
 
         return kwargs
 
 
-    def resource_uri_kwargs(self, bundle_or_obj=None):
+    def list_nested_uri_kwargs(self, bundle_or_obj):
+
+        kwargs = { }
+
+        if bundle_or_obj is not None:
+
+            if hasattr(bundle_or_obj, 'parent_object') and hasattr(bundle_or_obj, 'parent_resource'):
+                kwargs[bundle_or_obj.parent_resource._meta.detail_uri_name] = getattr(bundle_or_obj.parent_object, bundle_or_obj.parent_resource._meta.detail_uri_name)
+
+            if getattr(bundle_or_obj, 'nested_name', None) is not None:
+                kwargs['nested_name'] = getattr(bundle_or_obj, 'nested_name', None)
+
+        return kwargs
+
+
+    def resource_uri_kwargs(self, bundle_or_obj=None, url_name=''):
         """
         Builds a dictionary of kwargs to help generate URIs.
 
@@ -396,33 +431,42 @@ class ExtendedModelResource(ModelResource):
         if self._meta.api_name is not None:
             kwargs['api_name'] = self._meta.api_name
 
-        if hasattr(self, 'parent_resource'):
-            kwargs['nested_name'] = getattr(self, 'nested_resource_name', None)
-            kwargs['resource_name'] = self.parent_resource._meta.resource_name
-            kwargs.update(self.detail_nested_uri_kwargs(bundle_or_obj))
+        if hasattr(bundle_or_obj, 'parent_resource'):
+            kwargs['resource_name'] = bundle_or_obj.parent_resource._meta.resource_name
+            if url_name == 'api_dispatch_nested_detail':
+                kwargs.update(self.detail_nested_uri_kwargs(bundle_or_obj))
+            elif url_name == 'api_dispatch_nested_list':
+                kwargs.update(self.list_nested_uri_kwargs(bundle_or_obj))
         else:
             kwargs['resource_name'] = self._meta.resource_name
-            if bundle_or_obj is not None:
+            if url_name == 'api_dispatch_detail':
                 kwargs.update(self.detail_uri_kwargs(bundle_or_obj))
 
         return kwargs
 
 
     def get_resource_uri(self, bundle_or_obj=None, url_name='api_dispatch_list'):
-        if hasattr(self, 'parent_resource'):
-            if bundle_or_obj is not None:
+
+        if hasattr(bundle_or_obj, 'parent_object'):
+            if bundle_or_obj is not None and getattr(bundle_or_obj, 'obj', None) is not None:
                 url_name = 'api_dispatch_nested_detail'
             else:
                 url_name = 'api_dispatch_nested_list'
         else:
-            if bundle_or_obj is not None:
+            if bundle_or_obj is not None and getattr(bundle_or_obj, 'obj', None) is not None:
                 url_name = 'api_dispatch_detail'
         try:
-            kwargs = self.resource_uri_kwargs(bundle_or_obj)
+            kwargs = self.resource_uri_kwargs(bundle_or_obj, url_name=url_name)
+            try:
+                print "url: %s" % (bundle_or_obj.request.path)
+            except:
+                pass
+            print "kwargs: %s" % kwargs
+            print "url name: %s" % url_name
             url = self._build_reverse_url(url_name, kwargs=kwargs)
             return url
         except NoReverseMatch:
-            print 'Reverse url fail while building resource uri. args were: %s' % kwargs
+            print 'Reverse url fail while building resource uri. url: %s, args: %s' % (url_name, kwargs)
             return u''
 
     def base_urls(self):
@@ -494,6 +538,9 @@ class ExtendedModelResource(ModelResource):
 
         urls = [get_nested_url_list(nested_name) for nested_name in self._nested.keys()]
         [urls.append(get_nested_url_detail(nested_name, self._nested[nested_name])) for nested_name in self._nested.keys()]
+        if self._meta.resource_name == 'staff':
+            print "Nested URLS for resource: %s are: " % self._meta.resource_name
+            print urls
         return urls
 
 
@@ -872,6 +919,10 @@ class ExtendedModelResource(ModelResource):
             # Now pick up the M2M bits.
             m2m_bundle = self.hydrate_m2m(bundle)
             self.save_m2m(m2m_bundle)
+            #Set fileds for uri creation
+            bundle.parent_object = parent_object
+            bundle.nested_name = kwargs.get('nested_name', None)
+            bundle.parent_resource = kwargs.get('parent_resource', None)
             return bundle
         else:
             kwargs = self.real_remove_api_resource_names(kwargs)
@@ -1274,10 +1325,6 @@ class ExtendedModelResource(ModelResource):
             self.is_authorized_nested(request, kwargs['nested_name'],
                                       parent_resource,
                                       kwargs['parent_object'])
-            self.parent_resource = parent_resource
-            self.parent_object = kwargs['parent_object']
-
-            self.nested_resource_name = kwargs['nested_name']
 
         # All clear. Process the request.
         request = convert_post_to_put(request)
@@ -1362,7 +1409,13 @@ class ExtendedModelResource(ModelResource):
         objects = self.obj_get_list(request=request, **self.remove_api_resource_names(kwargs))
         sorted_objects = self.apply_sorting(objects, options=request.GET)
 
-        paginator = self._meta.paginator_class(request.GET, sorted_objects, resource_uri=self.get_resource_uri(),
+        bundle = Bundle()
+        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+            bundle.parent_resource = kwargs['parent_resource']
+            bundle.parent_object = kwargs['parent_object']
+            bundle.nested_name = kwargs['nested_name']
+
+        paginator = self._meta.paginator_class(request.GET, sorted_objects, resource_uri=self.get_resource_uri(bundle),
             limit=self._meta.limit, max_limit=self._meta.max_limit, collection_name=self._meta.collection_name)
         to_be_serialized = paginator.page()
 
@@ -1371,6 +1424,15 @@ class ExtendedModelResource(ModelResource):
         #10to8 change:
         set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
         map(set_full_depth, bundles)
+
+        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+            set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
+            set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
+            set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
+            map(set_parent_resource, bundles)
+            map(set_nested_name, bundles)
+            map(set_parent_object, bundles)
+
         to_be_serialized['objects'] = [self.full_dehydrate(bundle) for bundle in bundles]
         to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
         return self.create_response(request, to_be_serialized)
@@ -1411,6 +1473,12 @@ class ExtendedModelResource(ModelResource):
 
         bundle = self.build_bundle(obj=obj, request=request)
         bundle.full_depth = request.full_depth
+
+        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+            bundle.parent_resource = kwargs['parent_resource']
+            bundle.parent_object = kwargs['parent_object']
+            bundle.nested_name = kwargs['nested_name']
+
         bundle = self.full_dehydrate(bundle)
         bundle = self.alter_detail_data_to_serialize(request, bundle)
         return self.create_response(request, bundle)
