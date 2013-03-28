@@ -17,6 +17,7 @@ from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 from django.conf import settings
 import logging
 import dateutil.parser
+import datetime
 import pytz
 import re
 
@@ -311,6 +312,9 @@ class ExtendedModelResource(ModelResource):
             }
             desired_format = self.determine_format(request)
             serialized = self.serialize(request, data, desired_format)
+            # raise exception
+            import pprint
+            pprint.pprint(the_trace)
             return response_class(content=serialized, content_type=build_content_type(desired_format))
 
         if not response_code == 404:
@@ -1448,9 +1452,88 @@ class ExtendedModelResource(ModelResource):
 
         10to8 change:
             - We override here to inject our 'full_depth' attribute into bundles.
+            - Hooks for caching
         """
-        # TODO: Uncached for now. Invalidation that works for everyone may be
-        #       impossible.
+
+        def update_cache(data, date):
+
+            # keys: (dates_hash, data_hash, id)
+            # args: (value, date(seconds))
+            func = '''local cache_date = nil
+            cache_date = redis.call("HGET", KEYS[1], KEYS[3])
+            if cache_date == nil then
+                cache_date = 0
+            elseif cache_date == false then
+                cache_date = 0
+            end
+            if tonumber(cache_date) < tonumber(ARGV[2]) then
+                redis.call("HSET", KEYS[2], KEYS[3], ARGV[1])
+                redis.call("HSET", KEYS[1], KEYS[3], ARGV[2])
+                return true
+            else
+                return false
+            end
+            '''
+
+            print "Updating %s cache elements" % len(data)
+            import redis
+            r = redis.StrictRedis(host='localhost', port=6379, db=0)
+            set_cache = r.register_script(func)
+            pipe = r.pipeline()
+            for i in data.keys():
+                set_cache(
+                    keys=["%s/%s/dates" % (self._meta.api_name, self._meta.resource_name), "%s/%s/data" % (self._meta.api_name, self._meta.resource_name), i],
+                    args=[data[i], date.strftime("%s")],
+                    client=pipe
+                )
+
+            print pipe.execute()
+            #pipe = r.pipeline()
+            #pipe.hmset("%s/%s/data" % (self._meta.api_name, self._meta.resource_name), data)
+            #pipe.hmset("%s/%s/dates" % (self._meta.api_name, self._meta.resource_name), dates)
+            #pipe.execute()
+
+        def get_cached_response(ids):
+            import redis
+            r = redis.StrictRedis(host='localhost', port=6379, db=0)
+            pipe = r.pipeline()
+            pipe.hmget("%s/%s/data" % (self._meta.api_name, self._meta.resource_name), ids)
+            pipe.hmget("%s/%s/dates" % (self._meta.api_name, self._meta.resource_name), ids)
+            data, dates = pipe.execute()
+
+            if not len(data) == len(dates):
+                print "data and dates returned from cache are different lengths, this isn't good."
+                return [], ids
+
+            for i in range(len(dates)):
+                print dates[i]
+                if dates[i] is None or dates[i] == "None":
+                    dates[i] = None
+                    data[i] = None
+                elif data[i] is None or data[i] == "None":
+                    data[i] = None
+                    dates[i] = None
+            return data, dates
+
+
+        def get_non_cached(objects_to_serialise):
+
+            # Dehydrate the bundles in preparation for serialization.
+            bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
+            #10to8 change:
+            set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
+            map(set_full_depth, bundles)
+
+            if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+                set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
+                set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
+                set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
+                map(set_parent_resource, bundles)
+                map(set_nested_name, bundles)
+                map(set_parent_object, bundles)
+
+            return [self.full_dehydrate(bundle) for bundle in bundles]
+
         objects = self.obj_get_list(request=request, **self.remove_api_resource_names(kwargs))
         sorted_objects = self.apply_sorting(objects, options=request.GET)
 
@@ -1462,25 +1545,59 @@ class ExtendedModelResource(ModelResource):
 
         paginator = self._meta.paginator_class(request.GET, sorted_objects, resource_uri=self.get_resource_uri(bundle),
             limit=self._meta.limit, max_limit=self._meta.max_limit, collection_name=self._meta.collection_name)
+
         to_be_serialized = paginator.page()
 
-        # Dehydrate the bundles in preparation for serialization.
-        bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
-        #10to8 change:
-        set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
-        map(set_full_depth, bundles)
+        if getattr(self._meta, 'redis_cache', False):
+            print "REDIS CACHE ENABLED FOR RESOURCE %s" % self._meta.resource_name
+            # Query just the ids we should be returning
+            ids_to_get = list(to_be_serialized['objects'].values_list('id', flat=True))
 
-        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
-            set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
-            set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
-            set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
-            map(set_parent_resource, bundles)
-            map(set_nested_name, bundles)
-            map(set_parent_object, bundles)
+            # Look in the cache, return matches.
+            existing_data, existing_data_dates = get_cached_response(ids_to_get)
 
-        to_be_serialized['objects'] = [self.full_dehydrate(bundle) for bundle in bundles]
-        to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
-        return self.create_response(request, to_be_serialized)
+            missing_ids = []
+
+            # Work out what we're missing
+            for i in range(len(ids_to_get)):
+                if existing_data_dates[i] is None or existing_data[i] is None:
+                    missing_ids.append(ids_to_get[i])
+            total = len(ids_to_get)
+            misses = len(missing_ids)
+            hits = total - misses
+            print "Cache Stats: %s - %s hits, %s misses." % ((hits/total)*100, hits, misses)
+
+            # Fetch any objects we're missing
+            if misses > 0:
+                fetch_time = datetime.datetime.utcnow()
+                #TODO: this dosen't seem to filter on ids only.... 
+                un_cached_bundles = get_non_cached(objects.filter(id__in=missing_ids))
+                desired_format = self.determine_format(request)
+                print "Got %s un_cached_bundles" % len(un_cached_bundles)
+                for bundle in un_cached_bundles:
+                    serialized_bundle = self.serialize(request, bundle, desired_format)
+                    existing_data[ids_to_get.index(bundle.obj.id)] = serialized_bundle
+
+            # Build our serialised object.
+            desired_format = self.determine_format(request)
+            serialized_meta = self.serialize(request, to_be_serialized['meta'], desired_format)
+            serialised_objects = '[ ' + (''.join([obj + ', ' for obj in existing_data])).rstrip(', ') + ' ]'
+
+            # Shove our serialised objects into the cache, updating dates too.
+
+            update_data = {}
+            if misses > 0:
+                for id in missing_ids:
+                    update_data[id] = existing_data[ids_to_get.index(id)]
+                update_cache(update_data, fetch_time)
+
+            return HttpResponse(content='{ "meta": %s, "objects": %s}' % (serialized_meta, serialised_objects), content_type=build_content_type(desired_format))
+
+        else:
+            to_be_serialized['objects'] = get_non_cached(to_be_serialized['objects'])
+            to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
+            return self.create_response(request, to_be_serialized)
+
 
 
     def get_detail(self, request, **kwargs):
