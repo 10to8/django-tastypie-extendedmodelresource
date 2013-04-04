@@ -1060,7 +1060,8 @@ class ExtendedModelResource(ModelResource):
                 if delete_on_unlink == True:
                     related_mngr.filter(id__in=to_delete).delete()
                 else:
-                    related_mngr.remove(related_mngr.filter(id__in=to_delete))
+                    for a in related_mngr.filter(id__in=to_delete):
+                        related_mngr.remove(a)
 
             for related_bundle in existing:
                 related_bundle.obj.save()
@@ -1084,12 +1085,12 @@ class ExtendedModelResource(ModelResource):
             try:
                 return manager.get(pk=kwargs.pop('pk', None))
             except self._meta.object_class.DoesNotExist:
-                raise NotFound("Child object could not be found")
+                raise NotFound("Child object of class %s could not be found in resource %s ." % (self._meta.object_class.__name__, self._meta.resource_name))
         else:
             obj = kwargs.pop('child_object', None)
 
             if not isinstance(obj, self._meta.object_class):
-                raise NotFound("Child object could not be found.")
+                raise NotFound("Child object could of class %s not be found in resource %s." % (self._meta.object_class.__name__, self._meta.resource_name))
 
             return obj
 
@@ -1104,7 +1105,7 @@ class ExtendedModelResource(ModelResource):
             try:
                 bundle.obj = self.get_obj_from_parent_kwargs(**kwargs)
             except AttributeError:
-                raise BadRequest('Could not find child object for this resource')
+                raise BadRequest('Could not find child object for this resource (%s)' % self._meta.resource_name)
 
         kwargs = self.real_remove_api_resource_names(kwargs)
         return super(ExtendedModelResource, self).obj_update(bundle, request,
