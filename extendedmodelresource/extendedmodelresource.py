@@ -314,8 +314,15 @@ class ExtendedModelResource(ModelResource):
             return response_class(content=serialized, content_type=build_content_type(desired_format))
 
         if not response_code == 404:
+
             log = logging.getLogger('django.request.tastypie')
             log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': response_code, 'request':request})
+
+            try:
+                log2 = logging.getLogger('sentry')
+                log2.error('Internal Server Error: %s' % request.path, exc_info=True, extra={'status_code': response_code, 'request':request})
+            except:
+                raise
 
         # check our exception class for help dealing with its errors..
         response_code = getattr(exception, "_api_error_code", response_code)
