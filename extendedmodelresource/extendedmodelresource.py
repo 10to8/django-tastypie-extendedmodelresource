@@ -1,24 +1,27 @@
+import re
+import pytz
+import logging
+import dateutil.parser
+
+from django.conf import settings
+from django.db.models import Q
 from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
 from django.conf.urls.defaults import patterns, url
-from django.db.models import Q
+
+import tastypie.fields
 from tastypie import fields, http
 from tastypie.bundle import Bundle
 from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
+from tastypie.utils.mime import determine_format, build_content_type
+from tastypie.exceptions import ApiFieldError
+from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 from tastypie.resources import (ResourceOptions,
                                 ModelDeclarativeMetaclass,
                                 ModelResource,
                                 convert_post_to_put)
-from tastypie.utils.mime import determine_format, build_content_type
-from tastypie.exceptions import ApiFieldError
-import tastypie.fields
-from tastypie.utils import trailing_slash, dict_strip_unicode_keys
-from django.conf import settings
-import logging
-import dateutil.parser
-import pytz
-import re
+
 
 def nested_detail_uri_matcher(uri):
     expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
@@ -28,14 +31,14 @@ def nested_detail_uri_matcher(uri):
     return result.groupdict()
 
 
-def convert_aware_datetime_to_naive(dt):
+def convert_to_utc(dt):
     """
-    Convert to UTC, then remove the timezone.
+    Convert to UTC.
     """
-    if dt.tzinfo:
-        dt = dt.astimezone(pytz.UTC)
-        return dt.replace(tzinfo=None)
-    return dt
+    if not dt.tzinfo:
+        return dt.replace(tzinfo=pytz.UTC)
+    return dt.astimezone(pytz.UTC)
+
 
 class FullToOneField(fields.ToOneField):
     def __init__(self, *args, **kwargs):
@@ -769,7 +772,7 @@ class ExtendedModelResource(ModelResource):
             try:
                 # Try to rip a date/datetime out of it.
                 value = dateutil.parser.parse(value)
-                value = convert_aware_datetime_to_naive(value).isoformat()
+                value = convert_to_utc(value).isoformat()
             except ValueError:
                 raise BadRequest("Datetime provided to '%s' field doesn't appear to be a valid datetime string: '%s'" % (self.instance_name, value))
 
