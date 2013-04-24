@@ -23,6 +23,25 @@ from tastypie.resources import (ResourceOptions,
                                 convert_post_to_put)
 
 
+from tastypie.serializers import Serializer
+
+
+class TimeZoneSerializer(Serializer):
+
+    def format_datetime(self, data):
+        """
+        A hook to control how datetimes are formatted.
+
+        Can be overridden at the ``Serializer`` level (``datetime_formatting``)
+        or globally (via ``settings.TASTYPIE_DATETIME_FORMATTING``).
+
+        Default is ``iso-8601``, which looks like "2010-12-16T03:02:14".
+        """
+        result =  data.isoformat()
+        print result
+        return result
+
+
 def nested_detail_uri_matcher(uri):
     expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
     result = re.match(expression, uri)
@@ -280,6 +299,8 @@ class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
 
         new_class._nested = nested_fields
 
+        new_class._meta.serializer = TimeZoneSerializer()
+
         return new_class
 
 
@@ -317,6 +338,12 @@ class ExtendedModelResource(ModelResource):
             return response_class(content=serialized, content_type=build_content_type(desired_format))
 
         if not response_code == 404:
+
+            # import traceback
+            #
+            # traceback.print_stack()
+            # print traceback.format_exc()
+            # raise exception
 
             log = logging.getLogger('django.request.tastypie')
             log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': response_code, 'request':request})
