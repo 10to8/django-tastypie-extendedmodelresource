@@ -37,10 +37,7 @@ class TimeZoneSerializer(Serializer):
 
         Default is ``iso-8601``, which looks like "2010-12-16T03:02:14".
         """
-        result =  data.isoformat()
-        print result
-        return result
-
+        return data.isoformat()
 
 def nested_detail_uri_matcher(uri):
     expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
