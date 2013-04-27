@@ -1,3 +1,10 @@
+import re
+import pytz
+import logging
+import dateutil.parser
+
+from django.conf import settings
+from django.db.models import Q
 from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
@@ -6,20 +13,30 @@ from django.db.models import Q
 from tastypie import fields, http
 from tastypie.bundle import Bundle
 from tastypie.exceptions import NotFound, ImmediateHttpResponse, BadRequest
+from tastypie.utils.mime import determine_format, build_content_type
+from tastypie.exceptions import ApiFieldError
+from tastypie.utils import trailing_slash, dict_strip_unicode_keys
 from tastypie.resources import (ResourceOptions,
                                 ModelDeclarativeMetaclass,
                                 ModelResource,
                                 convert_post_to_put)
-from tastypie.utils.mime import determine_format, build_content_type
-from tastypie.exceptions import ApiFieldError
-import tastypie.fields
-from tastypie.utils import trailing_slash, dict_strip_unicode_keys
-from django.conf import settings
-import logging
-import dateutil.parser
-import datetime
-import pytz
-import re
+
+
+from tastypie.serializers import Serializer
+
+
+class TimeZoneSerializer(Serializer):
+
+    def format_datetime(self, data):
+        """
+        A hook to control how datetimes are formatted.
+
+        Can be overridden at the ``Serializer`` level (``datetime_formatting``)
+        or globally (via ``settings.TASTYPIE_DATETIME_FORMATTING``).
+
+        Default is ``iso-8601``, which looks like "2010-12-16T03:02:14".
+        """
+        return data.isoformat()
 
 def nested_detail_uri_matcher(uri):
     expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
@@ -29,14 +46,14 @@ def nested_detail_uri_matcher(uri):
     return result.groupdict()
 
 
-def convert_aware_datetime_to_naive(dt):
+def convert_to_utc(dt):
     """
-    Convert to UTC, then remove the timezone.
+    Convert to UTC.
     """
-    if dt.tzinfo:
-        dt = dt.astimezone(pytz.UTC)
-        return dt.replace(tzinfo=None)
-    return dt
+    if not dt.tzinfo:
+        return dt.replace(tzinfo=pytz.UTC)
+    return dt.astimezone(pytz.UTC)
+
 
 class FullToOneField(fields.ToOneField):
     def __init__(self, *args, **kwargs):
@@ -312,14 +329,24 @@ class ExtendedModelResource(ModelResource):
             }
             desired_format = self.determine_format(request)
             serialized = self.serialize(request, data, desired_format)
-            # raise exception
-            import pprint
-            pprint.pprint(the_trace)
             return response_class(content=serialized, content_type=build_content_type(desired_format))
 
         if not response_code == 404:
+
+            # import traceback
+            #
+            # traceback.print_stack()
+            # print traceback.format_exc()
+            # raise exception
+
             log = logging.getLogger('django.request.tastypie')
             log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': response_code, 'request':request})
+
+            try:
+                log2 = logging.getLogger('sentry')
+                log2.error('Internal Server Error: %s' % request.path, exc_info=True, extra={'status_code': response_code, 'request':request})
+            except:
+                raise
 
         # check our exception class for help dealing with its errors..
         response_code = getattr(exception, "_api_error_code", response_code)
@@ -1519,19 +1546,19 @@ class ExtendedModelResource(ModelResource):
 
         def get_non_cached(objects_to_serialise):
 
-            # Dehydrate the bundles in preparation for serialization.
-            bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
-            #10to8 change:
-            set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
-            map(set_full_depth, bundles)
+        # Dehydrate the bundles in preparation for serialization.
+        bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
+        #10to8 change:
+        set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
+        map(set_full_depth, bundles)
 
-            if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
-                set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
-                set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
-                set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
-                map(set_parent_resource, bundles)
-                map(set_nested_name, bundles)
-                map(set_parent_object, bundles)
+        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+            set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
+            set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
+            set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
+            map(set_parent_resource, bundles)
+            map(set_nested_name, bundles)
+            map(set_parent_object, bundles)
 
             return [self.full_dehydrate(bundle) for bundle in bundles]
 
@@ -1596,9 +1623,8 @@ class ExtendedModelResource(ModelResource):
 
         else:
             to_be_serialized['objects'] = get_non_cached(to_be_serialized['objects'])
-            to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
-            return self.create_response(request, to_be_serialized)
-
+        to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
+        return self.create_response(request, to_be_serialized)
 
 
     def get_detail(self, request, **kwargs):
