@@ -305,6 +305,8 @@ class ExtendedDeclarativeMetaclass(ModelDeclarativeMetaclass):
 
         new_class._nested = nested_fields
 
+        new_class._meta.serializer = TimeZoneSerializer()
+
         return new_class
 
 
@@ -803,7 +805,7 @@ class ExtendedModelResource(ModelResource):
             try:
                 # Try to rip a date/datetime out of it.
                 value = dateutil.parser.parse(value)
-                value = convert_aware_datetime_to_naive(value).isoformat()
+                value = convert_to_utc(value).isoformat()
             except ValueError:
                 raise BadRequest("Datetime provided to '%s' field doesn't appear to be a valid datetime string: '%s'" % (self.instance_name, value))
 
