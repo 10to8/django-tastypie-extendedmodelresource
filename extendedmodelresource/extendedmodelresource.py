@@ -2,7 +2,7 @@ import re
 import pytz
 import logging
 import dateutil.parser
-
+import datetime
 from django.conf import settings
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseNotFound, Http404
@@ -21,8 +21,9 @@ from tastypie.resources import (ResourceOptions,
                                 ModelResource,
                                 convert_post_to_put)
 
-
 from tastypie.serializers import Serializer
+
+from tastypie.fields import DateTimeField
 
 
 class TimeZoneSerializer(Serializer):
@@ -37,6 +38,15 @@ class TimeZoneSerializer(Serializer):
         Default is ``iso-8601``, which looks like "2010-12-16T03:02:14".
         """
         return data.isoformat()
+
+def convert_aware_datetime_to_naive(dt):
+    """
+    Convert to UTC, then remove the timezone.
+    """
+    if dt.tzinfo:
+        dt = dt.astimezone(pytz.UTC)
+        return dt.replace(tzinfo=None)
+    return dt
 
 def nested_detail_uri_matcher(uri):
     expression = "/(?P<url>[\w/]+)/(?P<resource_name>\w+)/(?P<pk>\d+)/(?P<child_resource_name>\w+)/(?P<child_pk>\d+)/?$"
@@ -789,7 +799,7 @@ class ExtendedModelResource(ModelResource):
             else:
                 value = value.split(',')
 
-        if isinstance(self.fields[field_name], tastypie.fields.DateTimeField):
+        if isinstance(self.fields[field_name], DateTimeField):
             try:
                 # Try to rip a date/datetime out of it.
                 value = dateutil.parser.parse(value)
@@ -1515,16 +1525,20 @@ class ExtendedModelResource(ModelResource):
                     client=pipe
                 )
 
-            print pipe.execute()
+            pipe.execute()
             #pipe = r.pipeline()
             #pipe.hmset("%s/%s/data" % (self._meta.api_name, self._meta.resource_name), data)
             #pipe.hmset("%s/%s/dates" % (self._meta.api_name, self._meta.resource_name), dates)
             #pipe.execute()
 
         def get_cached_response(ids):
+            if len(ids) == 0:
+                return [],[]
             import redis
             r = redis.StrictRedis(host='localhost', port=6379, db=0)
             pipe = r.pipeline()
+
+            print "%s/%s/data" % (self._meta.api_name, self._meta.resource_name)
             pipe.hmget("%s/%s/data" % (self._meta.api_name, self._meta.resource_name), ids)
             pipe.hmget("%s/%s/dates" % (self._meta.api_name, self._meta.resource_name), ids)
             data, dates = pipe.execute()
@@ -1546,19 +1560,19 @@ class ExtendedModelResource(ModelResource):
 
         def get_non_cached(objects_to_serialise):
 
-        # Dehydrate the bundles in preparation for serialization.
-        bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
-        #10to8 change:
-        set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
-        map(set_full_depth, bundles)
+            # Dehydrate the bundles in preparation for serialization.
+            bundles = [self.build_bundle(obj=obj, request=request) for obj in to_be_serialized['objects']]
+            #10to8 change:
+            set_full_depth = lambda b: setattr(b, 'full_depth', request.full_depth)
+            map(set_full_depth, bundles)
 
-        if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
-            set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
-            set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
-            set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
-            map(set_parent_resource, bundles)
-            map(set_nested_name, bundles)
-            map(set_parent_object, bundles)
+            if 'nested_name' in kwargs and 'parent_object' in kwargs and 'parent_resource' in kwargs:
+                set_parent_resource  = lambda b: setattr(b, 'parent_resource', kwargs['parent_resource'])
+                set_nested_name = lambda b: setattr(b, 'nested_name', kwargs['nested_name'])
+                set_parent_object = lambda b: setattr(b, 'parent_object', kwargs['parent_object'])
+                map(set_parent_resource, bundles)
+                map(set_nested_name, bundles)
+                map(set_parent_object, bundles)
 
             return [self.full_dehydrate(bundle) for bundle in bundles]
 
@@ -1580,7 +1594,7 @@ class ExtendedModelResource(ModelResource):
             print "REDIS CACHE ENABLED FOR RESOURCE %s" % self._meta.resource_name
             # Query just the ids we should be returning
             ids_to_get = list(to_be_serialized['objects'].values_list('id', flat=True))
-
+            print ids_to_get
             # Look in the cache, return matches.
             existing_data, existing_data_dates = get_cached_response(ids_to_get)
 
@@ -1593,7 +1607,11 @@ class ExtendedModelResource(ModelResource):
             total = len(ids_to_get)
             misses = len(missing_ids)
             hits = total - misses
-            print "Cache Stats: %s - %s hits, %s misses." % ((hits/total)*100, hits, misses)
+            if total > 0:
+                percentage = (hits/total)*100
+            else:
+                percentage = 100
+            print "Cache Stats: %s - %s hits, %s misses." % (percentage, hits, misses)
 
             # Fetch any objects we're missing
             if misses > 0:
@@ -1623,8 +1641,8 @@ class ExtendedModelResource(ModelResource):
 
         else:
             to_be_serialized['objects'] = get_non_cached(to_be_serialized['objects'])
-        to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
-        return self.create_response(request, to_be_serialized)
+            to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
+            return self.create_response(request, to_be_serialized)
 
 
     def get_detail(self, request, **kwargs):
