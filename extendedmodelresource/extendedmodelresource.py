@@ -866,6 +866,10 @@ class ExtendedModelResource(ModelResource):
         Performs authorization checks in every case.
         """
 
+        if len(self.real_remove_api_resource_names(kwargs)) == 0:
+            #NO filtering? No objects.
+            raise NotFound('Could not find child object for this resource')
+
         try:
             if 'child_object' in kwargs:
                 try:
@@ -1050,7 +1054,11 @@ class ExtendedModelResource(ModelResource):
         We don't clear the manager automatically, and we offer the choice of deleting objects that are unlinked.
 
         """
+
+
         for field_name, field_object in self.fields.items():
+
+
             if not getattr(field_object, 'is_m2m', False):
                 continue
 
