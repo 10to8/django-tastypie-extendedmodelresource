@@ -90,7 +90,6 @@ class ResourceUriOnlyLookup(object):
         except MultipleObjectsReturned:
             return fk_resource.full_hydrate(fk_bundle)
 
-
 class FullToOneField(fields.ToOneField, ResourceUriOnlyLookup):
     def __init__(self, *args, **kwargs):
         self.full_requestable = kwargs.pop('full_requestable', True)
