@@ -55,8 +55,43 @@ def convert_to_utc(dt):
         return dt.replace(tzinfo=pytz.UTC)
     return dt.astimezone(pytz.UTC)
 
+class ResourceUriOnlyLookup(object):
+    def resource_from_data(self, fk_resource, data, request=None, related_obj=None, related_name=None):
+        """
+        Given a dictionary-like structure is provided, a fresh related
+        resource is created using that data.
+        """
+        # Try to hydrate the data provided.
+        data = dict_strip_unicode_keys(data)
 
-class FullToOneField(fields.ToOneField):
+        if 'resource_uri' not in data.keys:
+            #We only support URI
+            fk_bundle = fk_resource.full_hydrate(fk_bundle)
+            fk_resource.is_valid(fk_bundle, request)
+            return fk_bundle
+
+        fk_bundle = fk_resource.build_bundle(data=data, request=request)
+
+        if related_obj:
+            fk_bundle.related_obj = related_obj
+            fk_bundle.related_name = related_name
+
+        # We need to check to see if updates are allowed on the FK
+        # resource. If not, we'll just return a populated bundle instead
+        # of mistakenly updating something that should be read-only.
+        if not fk_resource.can_update():
+            return fk_resource.full_hydrate(fk_bundle)
+        try:
+            return fk_resource.obj_update(fk_bundle, skip_errors=True, **data)
+        except NotFound:
+            fk_bundle = fk_resource.full_hydrate(fk_bundle)
+            fk_resource.is_valid(fk_bundle, request)
+            return fk_bundle
+        except MultipleObjectsReturned:
+            return fk_resource.full_hydrate(fk_bundle)
+
+
+class FullToOneField(fields.ToOneField, ResourceUriOnlyLookup):
     def __init__(self, *args, **kwargs):
         self.full_requestable = kwargs.pop('full_requestable', True)
 
@@ -121,7 +156,7 @@ class FullToOneField(fields.ToOneField):
             return related_resource.full_dehydrate(new_bundle)
 
 
-class FullToManyField(fields.ToManyField):
+class FullToManyField(fields.ToManyField, ResourceUriOnlyLookup):
     """
     Like tastypies's ToManyField but makes the resource_uri correct for nested resources, and we understand `full_depth`.
     """
