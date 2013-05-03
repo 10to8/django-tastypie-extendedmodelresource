@@ -339,6 +339,27 @@ class ExtendedModelResource(ModelResource):
 
     __metaclass__ = ExtendedDeclarativeMetaclass
 
+    def build_bundle(self, obj=None, data=None, request=None):
+        """
+        Given either an object, a data dictionary or both, builds a ``Bundle``
+        for use throughout the ``dehydrate/hydrate`` cycle.
+
+        If no object is provided, an empty object from
+        ``Resource._meta.object_class`` is created so that attempts to access
+        ``bundle.obj`` do not fail.
+        """
+        if obj is None:
+            obj = self._meta.object_class()
+
+        if hasattr(self, "get_actor"):
+            if request:
+                obj._actor = self.get_actor(request)
+            else:
+                obj._actor = self.get_actor(bundle.request)
+
+
+        return Bundle(obj=obj, data=data, request=request)
+
 
     def _handle_500(self, request, exception):
         """
@@ -973,6 +994,7 @@ class ExtendedModelResource(ModelResource):
         We also watch for our 'fail silently check' on the following exceptions:
 
         """
+
         if 'parent_resource' in kwargs:
 
             manager = kwargs.pop('related_manager', None)
@@ -1018,6 +1040,12 @@ class ExtendedModelResource(ModelResource):
                         kwargs.pop(key2)
                         continue
 
+            if hasattr(self, "get_actor"):
+                if request:
+                    bundle.obj._actor = self.get_actor(request)
+                else:
+                    bundle.obj._actor = self.get_actor(bundle.request)
+
             for key, value in kwargs.items():
                 setattr(bundle.obj, key, value)
 
@@ -1043,8 +1071,35 @@ class ExtendedModelResource(ModelResource):
             return bundle
         else:
             kwargs = self.real_remove_api_resource_names(kwargs)
-            return super(ExtendedModelResource, self).obj_create(bundle, request,
-                                                             **kwargs)
+
+            bundle.obj = self._meta.object_class()
+
+            if hasattr(self, "get_actor"):
+                if request:
+                    bundle.obj._actor = self.get_actor(request)
+                else:
+                    bundle.obj._actor = self.get_actor(bundle.request)
+
+            for key, value in kwargs.items():
+                setattr(bundle.obj, key, value)
+            bundle = self.full_hydrate(bundle)
+            self.is_valid(bundle, request)
+
+            if bundle.errors:
+                self.error_response(bundle.errors, request)
+
+            # Save FKs just in case.
+            self.save_related(bundle)
+
+            # Save parent
+            bundle.obj.save()
+
+            # Now pick up the M2M bits.
+            m2m_bundle = self.hydrate_m2m(bundle)
+            self.save_m2m(m2m_bundle)
+
+            return bundle
+
 
     def hydrate_m2m(self, bundle):
         """
@@ -1082,8 +1137,6 @@ class ExtendedModelResource(ModelResource):
 
 
         for field_name, field_object in self.fields.items():
-
-
             if not getattr(field_object, 'is_m2m', False):
                 continue
 
@@ -1126,6 +1179,8 @@ class ExtendedModelResource(ModelResource):
                 # We have an id, but we're not existing... odd.
                 new.append(related_bundle)
 
+            related_mngr.add(*[n.obj for n in new])
+
             to_delete = filter(lambda o: existing_objects[o] == False, existing_objects.keys())
             if len(to_delete)  > 0:
                 delete_on_unlink = getattr(field_object, "delete_on_unlink", False)
@@ -1136,9 +1191,10 @@ class ExtendedModelResource(ModelResource):
                         related_mngr.remove(a)
 
             for related_bundle in existing:
-                related_bundle.obj.save()
+                pass
+                # related_bundle.obj.save()
 
-            related_mngr.add(*[n.obj for n in new])
+
 
 
     def get_obj_from_parent_kwargs(self, **kwargs):
@@ -1180,8 +1236,47 @@ class ExtendedModelResource(ModelResource):
                 raise BadRequest('Could not find child object for this resource (%s)' % self._meta.resource_name)
 
         kwargs = self.real_remove_api_resource_names(kwargs)
-        return super(ExtendedModelResource, self).obj_update(bundle, request,
-                                            skip_errors=skip_errors, **kwargs)
+
+        if not bundle.obj or not self.get_bundle_detail_data(bundle):
+            try:
+                lookup_kwargs = self.lookup_kwargs_with_identifiers(bundle, kwargs)
+            except:
+                # if there is trouble hydrating the data, fall back to just
+                # using kwargs by itself (usually it only contains a "pk" key
+                # and this will work fine.
+                lookup_kwargs = kwargs
+
+            try:
+                bundle.obj = self.obj_get(bundle.request, **lookup_kwargs)
+            except ObjectDoesNotExist:
+                raise NotFound("A model instance matching the provided arguments could not be found.")
+
+        bundle = self.full_hydrate(bundle)
+        self.is_valid(bundle, request)
+
+
+
+        if bundle.errors and not skip_errors:
+            self.error_response(bundle.errors, request)
+
+        # Save FKs just in case.
+        self.save_related(bundle)
+
+        # Save the main object.
+
+        if hasattr(self, "get_actor"):
+            if request:
+                bundle.obj._actor = self.get_actor(request)
+            else:
+                bundle.obj._actor = self.get_actor(bundle.request)
+
+
+        bundle.obj.save()
+
+        # Now pick up the M2M bits.
+        m2m_bundle = self.hydrate_m2m(bundle)
+        self.save_m2m(m2m_bundle)
+        return bundle
 
     def obj_delete_list(self, request=None, **kwargs):
         """
