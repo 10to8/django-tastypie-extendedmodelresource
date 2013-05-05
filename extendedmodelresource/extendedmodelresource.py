@@ -5,6 +5,8 @@ import dateutil.parser
 import datetime
 from django.conf import settings
 from django.db.models import Q
+from django.db import transaction
+
 from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.core.urlresolvers import get_script_prefix, resolve, Resolver404, NoReverseMatch
@@ -357,15 +359,16 @@ class ExtendedModelResource(ModelResource):
         If no object is provided, an empty object from
         ``Resource._meta.object_class`` is created so that attempts to access
         ``bundle.obj`` do not fail.
+
+        10to8 change - set the actor.
+
         """
         if obj is None:
             obj = self._meta.object_class()
 
         if hasattr(self, "get_actor"):
-            if request:
-                obj._actor = self.get_actor(request)
-            else:
-                obj._actor = self.get_actor(bundle.request)
+            obj._actor = self.get_actor(request)
+
 
 
         return Bundle(obj=obj, data=data, request=request)
@@ -384,6 +387,15 @@ class ExtendedModelResource(ModelResource):
         response_class = http.HttpResponse
         response_code = 500
 
+        if transaction.is_managed():
+            if transaction.is_dirty():
+                # This rollback might fail because of network failure for example.
+                # If rollback isn't possible it is impossible to clean the
+                # connection's state. So leave the connection in dirty state and
+                # let request_finished signal deal with cleaning the connection.
+                transaction.rollback()
+            transaction.leave_transaction_management()
+
         NOT_FOUND_EXCEPTIONS = (NotFound, ObjectDoesNotExist, Http404)
 
         if isinstance(exception, NOT_FOUND_EXCEPTIONS):
@@ -401,8 +413,8 @@ class ExtendedModelResource(ModelResource):
 
         if not response_code == 404:
 
-            # import traceback
-            #
+            import traceback
+
             # traceback.print_stack()
             # print traceback.format_exc()
             # raise exception
@@ -1051,10 +1063,7 @@ class ExtendedModelResource(ModelResource):
                         continue
 
             if hasattr(self, "get_actor"):
-                if request:
-                    bundle.obj._actor = self.get_actor(request)
-                else:
-                    bundle.obj._actor = self.get_actor(bundle.request)
+                bundle.obj._actor = self.get_actor(request, bundle=bundle)
 
             for key, value in kwargs.items():
                 setattr(bundle.obj, key, value)
@@ -1085,10 +1094,7 @@ class ExtendedModelResource(ModelResource):
             bundle.obj = self._meta.object_class()
 
             if hasattr(self, "get_actor"):
-                if request:
-                    bundle.obj._actor = self.get_actor(request)
-                else:
-                    bundle.obj._actor = self.get_actor(bundle.request)
+                bundle.obj._actor = self.get_actor(request, bundle=bundle)
 
             for key, value in kwargs.items():
                 setattr(bundle.obj, key, value)
@@ -1105,6 +1111,7 @@ class ExtendedModelResource(ModelResource):
             bundle.obj.save()
 
             # Now pick up the M2M bits.
+
             m2m_bundle = self.hydrate_m2m(bundle)
             self.save_m2m(m2m_bundle)
 
@@ -1147,6 +1154,7 @@ class ExtendedModelResource(ModelResource):
 
 
         for field_name, field_object in self.fields.items():
+
             if not getattr(field_object, 'is_m2m', False):
                 continue
 
@@ -1195,7 +1203,13 @@ class ExtendedModelResource(ModelResource):
             if len(to_delete)  > 0:
                 delete_on_unlink = getattr(field_object, "delete_on_unlink", False)
                 if delete_on_unlink == True:
-                    related_mngr.filter(id__in=to_delete).delete()
+                    #TODO: Soft delete, if enabled.
+
+                    for obj in related_mngr.filter(id__in=to_delete):
+                        if hasattr(obj, 'soft_delete'):
+                            obj.soft_delete()
+                        else:
+                            obj.delete()
                 else:
                     for a in related_mngr.filter(id__in=to_delete):
                         related_mngr.remove(a)
@@ -1275,10 +1289,7 @@ class ExtendedModelResource(ModelResource):
         # Save the main object.
 
         if hasattr(self, "get_actor"):
-            if request:
-                bundle.obj._actor = self.get_actor(request)
-            else:
-                bundle.obj._actor = self.get_actor(bundle.request)
+            bundle.obj._actor = self.get_actor(request, bundle=bundle)
 
 
         bundle.obj.save()
